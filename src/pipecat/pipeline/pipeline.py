@@ -1,15 +1,28 @@
-#
-# Copyright (c) 2024–2025, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 from typing import Callable, Coroutine, List
 
 from pipecat.frames.frames import Frame
 from pipecat.pipeline.base_pipeline import BasePipeline
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from loguru import logger
+from pipecat.frames.frames import InputAudioRawFrame, TTSAudioRawFrame, BotSpeakingFrame, OutputAudioRawFrame
 
+# This pipeline is from callbook-pipeline
+
+class FrameLogger(FrameProcessor):
+
+    OMIT_LOGS = [InputAudioRawFrame, TTSAudioRawFrame, BotSpeakingFrame, OutputAudioRawFrame]
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+
+        if not any(isinstance(frame, frame_class) for frame_class in self.OMIT_LOGS):
+            logger.debug(f"From:{self._prev} To:{self._next} Frame:{frame}")
+
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+    
+    async def cleanup(self):
+        logger.debug(f"Cleaning up logger: {self}")
+        await super().cleanup()
 
 class PipelineSource(FrameProcessor):
     def __init__(self, upstream_push_frame: Callable[[Frame, FrameDirection], Coroutine]):
@@ -50,7 +63,6 @@ class Pipeline(BasePipeline):
         self._source = PipelineSource(self.push_frame)
         self._sink = PipelineSink(self.push_frame)
         self._processors: List[FrameProcessor] = [self._source] + processors + [self._sink]
-
         self._link_processors()
 
     #
@@ -82,7 +94,7 @@ class Pipeline(BasePipeline):
         elif direction == FrameDirection.UPSTREAM:
             await self._sink.queue_frame(frame, FrameDirection.UPSTREAM)
 
-    async def _cleanup_processors(self):
+    async def _cleanup_processors(self):            
         for p in self._processors:
             await p.cleanup()
 

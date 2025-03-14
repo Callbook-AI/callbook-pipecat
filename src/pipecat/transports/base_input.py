@@ -155,10 +155,13 @@ class BaseInputTransport(FrameProcessor):
             # Make sure we notify about interruptions quickly out-of-band.
             if self.interruptions_allowed:
                 await self._start_interruption()
+                asyncio.get_event_loop().call_soon_threadsafe(
+                    lambda: asyncio.create_task(self.push_frame(StartInterruptionFrame()))
+                )
                 # Push an out-of-band frame (i.e. not using the ordered push
                 # frame task) to stop everything, specially at the output
                 # transport.
-                await self.push_frame(StartInterruptionFrame())
+                # await self.push_frame(StartInterruptionFrame())
         elif isinstance(frame, UserStoppedSpeakingFrame):
             logger.debug("User stopped speaking")
             if self.interruptions_allowed:
