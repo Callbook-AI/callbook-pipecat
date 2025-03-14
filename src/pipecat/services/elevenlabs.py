@@ -312,7 +312,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             self._receive_task = self.create_task(self._receive_task_handler(self.push_error))
 
         if not self._keepalive_task:
-            self._keepalive_task = self.create_task(self._keepalive_task_handler())
+            self._keepalive_task = self.create_monitored_task(self._keepalive_task_handler)
 
     async def _disconnect(self):
         if self._receive_task:
@@ -386,6 +386,8 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
 
     async def _receive_messages(self):
         async for message in self._get_websocket():
+            if not self._started: continue
+
             msg = json.loads(message)
             if msg.get("audio"):
                 await self.stop_ttfb_metrics()
@@ -399,8 +401,10 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 await self.add_word_timestamps(word_times)
                 self._cumulative_time = word_times[-1][1]
 
-    async def _keepalive_task_handler(self):
+    async def _keepalive_task_handler(self, task_name):
         while True:
+            if not self.is_monitored_task_active(task_name): return 
+
             await asyncio.sleep(10)
             try:
                 await self._send_text("")
