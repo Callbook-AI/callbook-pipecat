@@ -502,16 +502,19 @@ class WordTTSService(TTSService):
 
     def _create_words_task(self):
         if not self._words_task:
-            self._words_task = self.create_task(self._words_task_handler())
+            self._words_task = self.create_monitored_task(self._words_task_handler)
 
     async def _stop_words_task(self):
         if self._words_task:
             await self.cancel_task(self._words_task)
             self._words_task = None
 
-    async def _words_task_handler(self):
+    async def _words_task_handler(self, task_name):
         last_pts = 0
         while True:
+
+            if self.is_monitored_task_active(task_name): return
+
             (word, timestamp) = await self._words_queue.get()
             if word == "Reset" and timestamp == 0:
                 self.reset_word_timestamps()
