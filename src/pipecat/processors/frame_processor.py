@@ -6,9 +6,10 @@
 
 import asyncio
 from enum import Enum
-from typing import Awaitable, Callable, Coroutine, Optional
+from typing import Awaitable, Callable, Coroutine, Optional, Any
 
 from loguru import logger
+import uuid
 
 from pipecat.clocks.base_clock import BaseClock
 from pipecat.frames.frames import (
@@ -80,6 +81,7 @@ class FrameProcessor(BaseObject):
         # task. This avoid problems like audio overlapping. System frames are the
         # exception to this rule. This create this task.
         self.__push_frame_task: Optional[asyncio.Task] = None
+        self._monitored_tasks = {}
 
     @property
     def id(self) -> int:
@@ -153,9 +155,27 @@ class FrameProcessor(BaseObject):
         name = f"{self}::{coroutine.cr_code.co_name}"
         return self._task_manager.create_task(coroutine, name)
 
+      
+    def create_monitored_task(self, async_function: Callable[..., Awaitable], *args: Any) -> asyncio.Task:
+
+        task_id = uuid.uuid4()
+        task_name = f"{self}::{async_function.__name__}::{task_id}"
+        self._monitored_tasks[task_name] = True
+
+        return self.create_task(async_function(task_name, *args), task_name)
+    
+    def is_monitored_task_active(self, name: str):
+        return self._monitored_tasks.get(name)
+
+
     async def cancel_task(self, task: asyncio.Task, timeout: Optional[float] = None):
         if not self._task_manager:
             raise Exception(f"{self} TaskManager is still not initialized.")
+
+        task_name = task.get_name()
+        monitored_task = self._monitored_tasks.get(task_name)
+        if monitored_task: self._monitored_tasks[task_name] = False
+
         await self._task_manager.cancel_task(task, timeout)
 
     async def wait_for_task(self, task: asyncio.Task, timeout: Optional[float] = None):

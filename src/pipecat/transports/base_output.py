@@ -243,10 +243,10 @@ class BaseOutputTransport(FrameProcessor):
     def _create_sink_tasks(self):
         if not self._sink_task:
             self._sink_queue = asyncio.Queue()
-            self._sink_task = self.create_task(self._sink_task_handler())
+            self._sink_task = self.create_monitored_task(self._sink_task_handler)
         if not self._sink_clock_task:
             self._sink_clock_queue = asyncio.PriorityQueue()
-            self._sink_clock_task = self.create_task(self._sink_clock_task_handler())
+            self._sink_clock_task = self.create_monitored_task(self._sink_clock_task_handler)
 
     async def _cancel_sink_tasks(self):
         # Stop sink tasks.
@@ -266,10 +266,14 @@ class BaseOutputTransport(FrameProcessor):
         elif isinstance(frame, TransportMessageFrame):
             await self.send_message(frame)
 
-    async def _sink_clock_task_handler(self):
+    async def _sink_clock_task_handler(self, task_name):
         running = True
         while running:
             try:
+
+                if not self.is_monitored_task_active(task_name): 
+                    return
+
                 timestamp, _, frame = await self._sink_clock_queue.get()
 
                 # If we hit an EndFrame, we can finish right away.
@@ -334,8 +338,13 @@ class BaseOutputTransport(FrameProcessor):
         else:
             return without_mixer(BOT_VAD_STOP_SECS)
 
-    async def _sink_task_handler(self):
+    async def _sink_task_handler(self, task_name):
+
         async for frame in self._next_frame():
+
+            if not self.is_monitored_task_active(task_name): 
+                return 
+
             # Notify the bot started speaking upstream if necessary and that
             # it's actually speaking.
             if isinstance(frame, TTSAudioRawFrame):

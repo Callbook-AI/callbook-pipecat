@@ -264,6 +264,8 @@ class AudioBufferProcessor(FrameProcessor):
 
         # Call original handler with merged audio
         merged_audio = self.merge_audio_buffers()
+        self._reset_audio_buffers()
+        
         await self._call_event_handler(
             "on_audio_data", merged_audio, self._sample_rate, self._num_channels
         )
@@ -277,7 +279,6 @@ class AudioBufferProcessor(FrameProcessor):
             self._num_channels,
         )
 
-        self._reset_audio_buffers()
 
     def _buffer_has_audio(self, buffer: bytearray) -> bool:
         return buffer is not None and len(buffer) > 0
