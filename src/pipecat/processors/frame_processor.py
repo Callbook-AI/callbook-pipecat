@@ -345,15 +345,18 @@ class FrameProcessor(BaseObject):
             self.__should_block_frames = False
             self.__input_event.clear()
             self.__input_queue = asyncio.Queue()
-            self.__input_frame_task = self.create_task(self.__input_frame_task_handler())
+            self.__input_frame_task = self.create_monitored_task(self.__input_frame_task_handler)
 
     async def __cancel_input_task(self):
         if self.__input_frame_task:
             await self.cancel_task(self.__input_frame_task)
             self.__input_frame_task = None
 
-    async def __input_frame_task_handler(self):
+    async def __input_frame_task_handler(self, task_name):
         while True:
+
+            if not self.is_monitored_task_active(task_name): return
+
             if self.__should_block_frames:
                 logger.trace(f"{self}: frame processing paused")
                 await self.__input_event.wait()
