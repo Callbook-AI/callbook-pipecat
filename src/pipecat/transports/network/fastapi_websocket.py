@@ -205,7 +205,8 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
         await self._write_frame(frame)
 
     async def write_raw_audio_frames(self, frames: bytes):
-        if self._client.is_closing:
+        if self._client.is_closing: 
+            await self._write_audio_sleep()
             return
 
         if not self._client.is_connected:
