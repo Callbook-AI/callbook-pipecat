@@ -513,7 +513,7 @@ class WordTTSService(TTSService):
         last_pts = 0
         while True:
 
-            if self.is_monitored_task_active(task_name): return
+            if not self.is_monitored_task_active(task_name): return
 
             (word, timestamp) = await self._words_queue.get()
             if word == "Reset" and timestamp == 0:
