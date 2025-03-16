@@ -262,7 +262,7 @@ class DeepgramSTTService(STTService):
         if len(transcript) > 0:
             await self.stop_ttfb_metrics()
 
-            logger.debug(f"Transcription {"" if is_final else "interim"}: {transcript}")
+            logger.debug(f"Transcription {'' if is_final else 'interim'}: {transcript}")
 
             if is_final:
                 await self.push_frame(
