@@ -347,8 +347,8 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
     async def _handle_user_stopped_speaking(self, _: UserStoppedSpeakingFrame):
         self._last_user_speaking_time = time.time()
         self._user_speaking = False
-        if not self._seen_interim_results:
-            await self.push_aggregation()
+        # if not self._seen_interim_results:
+        await self.push_aggregation()
 
     async def _handle_transcription(self, frame: TranscriptionFrame):
         text = frame.text
