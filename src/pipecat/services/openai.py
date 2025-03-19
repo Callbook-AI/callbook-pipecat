@@ -297,7 +297,6 @@ class BaseOpenAILLMService(LLMService):
         logger.debug(f"{self}: XXXX Finished processing function calls")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        logger.debug(f"{self}: XXXX Entered process frame {frame}")
         await super().process_frame(frame, direction)
 
         context = None
