@@ -89,6 +89,8 @@ class TwilioFrameSerializer(FrameSerializer):
             with open(os.path.join(self._folder_path, "payload.txt"), "ab") as f:
                 f.write(payload)
 
+            logger.info(f"Received media event with payload length: {len(payload)}")
+
             # Input: Convert Twilio's 8kHz μ-law to PCM at pipeline input rate
             deserialized_data = await ulaw_to_pcm(
                 payload, self._twilio_sample_rate, self._sample_rate, self._resampler
