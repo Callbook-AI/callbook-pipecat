@@ -6,6 +6,8 @@
 
 import base64
 import json
+import os
+import datetime
 from typing import Optional
 
 from pydantic import BaseModel
@@ -23,6 +25,7 @@ from pipecat.frames.frames import (
     TransportMessageUrgentFrame,
 )
 from pipecat.serializers.base_serializer import FrameSerializer, FrameSerializerType
+from loguru import logger
 
 
 class TwilioFrameSerializer(FrameSerializer):
@@ -30,14 +33,21 @@ class TwilioFrameSerializer(FrameSerializer):
         twilio_sample_rate: int = 8000  # Default Twilio rate (8kHz)
         sample_rate: Optional[int] = None  # Pipeline input rate
 
-    def __init__(self, stream_sid: str, params: InputParams = InputParams()):
+    def __init__(self, stream_sid: str, call_sid: str = "", params: InputParams = InputParams()):
         self._stream_sid = stream_sid
         self._params = params
+        self._call_sid = call_sid
 
         self._twilio_sample_rate = self._params.twilio_sample_rate
         self._sample_rate = 0  # Pipeline input rate
 
         self._resampler = create_default_resampler()
+
+        folder_name = f"{self._call_sid}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+        self._folder_path = os.path.join("/home/ubuntu", folder_name)
+        os.makedirs(self._folder_path, exist_ok=True)
+        open(os.path.join(self._folder_path, "payload_base64.txt"), "w").close()
+        open(os.path.join(self._folder_path, "payload.txt"), "w").close()
 
     @property
     def type(self) -> FrameSerializerType:
@@ -73,10 +83,11 @@ class TwilioFrameSerializer(FrameSerializer):
 
         if message["event"] == "media":
             payload_base64 = message["media"]["payload"]
+            with open(os.path.join(self._folder_path, "payload_base64.txt"), "a") as f:
+                f.write(payload_base64)
             payload = base64.b64decode(payload_base64)
-
-            print(f"Received Twilio audio payload of size: {len(payload)} bytes")
-
+            with open(os.path.join(self._folder_path, "payload.txt"), "ab") as f:
+                f.write(payload)
 
             # Input: Convert Twilio's 8kHz μ-law to PCM at pipeline input rate
             deserialized_data = await ulaw_to_pcm(
