@@ -75,6 +75,9 @@ class TwilioFrameSerializer(FrameSerializer):
             payload_base64 = message["media"]["payload"]
             payload = base64.b64decode(payload_base64)
 
+            print(f"Received Twilio audio payload of size: {len(payload)} bytes")
+
+
             # Input: Convert Twilio's 8kHz μ-law to PCM at pipeline input rate
             deserialized_data = await ulaw_to_pcm(
                 payload, self._twilio_sample_rate, self._sample_rate, self._resampler
