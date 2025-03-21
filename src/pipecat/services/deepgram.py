@@ -16,6 +16,7 @@ from pipecat.frames.frames import (
     Frame,
     InterimTranscriptionFrame,
     StartFrame,
+    StartInterruptionFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
@@ -151,6 +152,8 @@ class DeepgramSTTService(STTService):
 
         self._settings = merged_options.to_dict()
         self._addons = addons
+        self._user_speaking = False
+
 
         self._client = DeepgramClient(
             api_key,
@@ -249,6 +252,24 @@ class DeepgramSTTService(STTService):
     async def _on_utterance_end(self, *args, **kwargs):
         await self._call_event_handler("on_utterance_end", *args, **kwargs)
 
+
+    async def _handle_user_speaking(self):
+        
+        if self._user_speaking == True: return
+
+        self._user_speaking = True
+
+        await self.push_frame(StartInterruptionFrame())
+        await self.push_frame(UserStartedSpeakingFrame())
+
+    async def _handle_user_silence(self):
+
+        if self._user_speaking == False: return
+
+        self._user_speaking = False
+        await self.push_frame(UserStoppedSpeakingFrame())
+
+
     async def _on_message(self, *args, **kwargs):
         result: LiveResultResponse = kwargs["result"]
         if len(result.channel.alternatives) == 0:
@@ -262,14 +283,17 @@ class DeepgramSTTService(STTService):
         if len(transcript) > 0:
             await self.stop_ttfb_metrics()
 
-            logger.debug(f"Transcription {'' if is_final else 'interim'}: {transcript}")
+            logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
 
             if is_final:
+                await self._handle_user_speaking()
                 await self.push_frame(
                     TranscriptionFrame(transcript, "", time_now_iso8601(), language)
                 )
+                await self._handle_user_silence()
                 await self.stop_processing_metrics()
             else:
+                await self._handle_user_speaking()
                 await self.push_frame(
                     InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
                 )
