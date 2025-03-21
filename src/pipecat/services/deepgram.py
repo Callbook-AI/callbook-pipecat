@@ -10,6 +10,8 @@ from typing import AsyncGenerator, Dict, Optional
 from loguru import logger
 
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     ErrorFrame,
@@ -153,6 +155,7 @@ class DeepgramSTTService(STTService):
         self._settings = merged_options.to_dict()
         self._addons = addons
         self._user_speaking = False
+        self._bot_speaking = True
 
 
         self._client = DeepgramClient(
@@ -269,6 +272,41 @@ class DeepgramSTTService(STTService):
         self._user_speaking = False
         await self.push_frame(UserStoppedSpeakingFrame())
 
+    async def _handle_bot_speaking(self):
+        self._bot_speaking = True
+
+
+    async def _handle_bot_silence(self):
+        self._bot_speaking = False
+
+
+    def _transcript_words_count(self, transcript: str):
+        return len(transcript.split(" "))
+    
+    async def _on_final_transcript_message(self, transcript, language):
+
+        if self._bot_speaking and self._transcript_words_count(transcript) == 1: 
+            logger.debug("Ignoring short word because bot is speaking: ", transcript)
+            return
+
+        await self._handle_user_speaking()
+        await self.push_frame(
+            TranscriptionFrame(transcript, "", time_now_iso8601(), language)
+        )
+        await self._handle_user_silence()
+        await self.stop_processing_metrics()
+    
+    async def _on_interim_transcript_message(self, transcript, language):
+
+        if self._bot_speaking and self._transcript_words_count(transcript) == 1: 
+            logger.debug("Ignoring Deepgram interruption because bot is speaking: ", transcript)
+            return
+        
+        await self._handle_user_speaking()
+        await self.push_frame(
+            InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
+        )
+
 
     async def _on_message(self, *args, **kwargs):
         result: LiveResultResponse = kwargs["result"]
@@ -286,20 +324,21 @@ class DeepgramSTTService(STTService):
             logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
 
             if is_final:
-                await self._handle_user_speaking()
-                await self.push_frame(
-                    TranscriptionFrame(transcript, "", time_now_iso8601(), language)
-                )
-                await self._handle_user_silence()
-                await self.stop_processing_metrics()
+                await self._on_final_transcript_message(transcript, language)
             else:
-                await self._handle_user_speaking()
-                await self.push_frame(
-                    InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
-                )
+                await self._on_interim_transcript_message(transcript, language)
+                
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+
+        if isinstance(frame, BotStartedSpeakingFrame):
+            logger.debug("Received bot started speaking on deepgram")
+            await self._handle_bot_speaking()
+
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            logger.debug("Received bot started speaking on deepgram")
+            await self._handle_bot_silence()
 
         if isinstance(frame, UserStartedSpeakingFrame) and not self.vad_enabled:
             # Start metrics if Deepgram VAD is disabled & pipeline VAD has detected speech
