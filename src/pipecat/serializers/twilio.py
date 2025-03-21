@@ -43,12 +43,6 @@ class TwilioFrameSerializer(FrameSerializer):
 
         self._resampler = create_default_resampler()
 
-        folder_name = f"{self._call_sid}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-        self._folder_path = os.path.join("/home/ubuntu", folder_name)
-        os.makedirs(self._folder_path, exist_ok=True)
-        open(os.path.join(self._folder_path, "payload_base64.txt"), "w").close()
-        open(os.path.join(self._folder_path, "payload.txt"), "w").close()
-
     @property
     def type(self) -> FrameSerializerType:
         return FrameSerializerType.TEXT
@@ -82,12 +76,9 @@ class TwilioFrameSerializer(FrameSerializer):
         message = json.loads(data)
 
         if message["event"] == "media":
+            
             payload_base64 = message["media"]["payload"]
-            with open(os.path.join(self._folder_path, "payload_base64.txt"), "a") as f:
-                f.write(payload_base64)
             payload = base64.b64decode(payload_base64)
-            with open(os.path.join(self._folder_path, "payload.txt"), "ab") as f:
-                f.write(payload)
 
             # Input: Convert Twilio's 8kHz μ-law to PCM at pipeline input rate
             deserialized_data = await ulaw_to_pcm(
