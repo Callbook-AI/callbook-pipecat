@@ -178,7 +178,7 @@ class BaseOpenAILLMService(LLMService):
     async def _stream_chat_completions(
         self, context: OpenAILLMContext
     ) -> AsyncStream[ChatCompletionChunk]:
-        logger.debug(f"{self}:XXX Generating chat [{context.get_messages_for_logging()}]")
+        logger.debug(f"{self}: Generating chat [{context.get_messages_for_logging()}]")
 
         messages: List[ChatCompletionMessageParam] = context.get_messages()
 
@@ -198,7 +198,7 @@ class BaseOpenAILLMService(LLMService):
                 del message["mime_type"]
 
         chunks = await self.get_chat_completions(context, messages)
-        logger.debug(f"{self}:XXX Got chat completions")
+        logger.debug(f"{self}: Got chat completions")
 
         return chunks
 
@@ -212,11 +212,11 @@ class BaseOpenAILLMService(LLMService):
         tool_call_id = ""
 
         await self.start_ttfb_metrics()
-        logger.debug(f"{self}: XXX Just before getting chat completions")
+        logger.debug(f"{self}: Just before getting chat completions")
         chunk_stream: AsyncStream[ChatCompletionChunk] = await self._stream_chat_completions(
             context
         )
-        logger.debug(f"{self}: XXX Got chat completions and started processing chunks")
+        logger.debug(f"{self}: Got chat completions and started processing chunks")
         async for chunk in chunk_stream:
             if chunk.usage:
                 tokens = LLMTokenUsage(
@@ -264,7 +264,7 @@ class BaseOpenAILLMService(LLMService):
             elif chunk.choices[0].delta.content:
                 await self.push_frame(LLMTextFrame(chunk.choices[0].delta.content))
         
-        logger.debug(f"{self}: XXXX Finished processing chunks and starting function calls")
+        logger.debug(f"{self}: Finished processing chunks and starting function calls")
 
         # if we got a function name and arguments, check to see if it's a function with
         # a registered handler. If so, run the registered callback, save the result to
@@ -294,7 +294,7 @@ class BaseOpenAILLMService(LLMService):
                         f"The LLM tried to call a function named '{function_name}', but there isn't a callback registered for that function."
                     )
 
-        logger.debug(f"{self}: XXXX Finished processing function calls")
+        logger.debug(f"{self}: Finished processing function calls")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)

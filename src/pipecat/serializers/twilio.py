@@ -76,11 +76,9 @@ class TwilioFrameSerializer(FrameSerializer):
         message = json.loads(data)
 
         if message["event"] == "media":
-            
+
             payload_base64 = message["media"]["payload"]
             payload = base64.b64decode(payload_base64)
-
-            logger.info(f"Received media event with payload length: {len(payload)}")
 
             # Input: Convert Twilio's 8kHz μ-law to PCM at pipeline input rate
             deserialized_data = await ulaw_to_pcm(
