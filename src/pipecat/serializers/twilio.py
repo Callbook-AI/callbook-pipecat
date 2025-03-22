@@ -47,6 +47,12 @@ class TwilioFrameSerializer(FrameSerializer):
     def type(self) -> FrameSerializerType:
         return FrameSerializerType.TEXT
 
+
+    @property
+    def sample_rate(self) -> int:
+        """Public property to access the current sample rate."""
+        return self._sample_rate
+    
     async def setup(self, frame: StartFrame):
         self._sample_rate = self._params.sample_rate or frame.audio_in_sample_rate
 
