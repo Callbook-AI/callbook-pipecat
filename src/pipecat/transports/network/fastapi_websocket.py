@@ -111,6 +111,9 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         self._params = params
         self._receive_task = None
         self._monitor_websocket_task = None
+        self._silence_audio_task = None
+        self._started = False
+        self._last_audio_frame_time = None
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
@@ -120,6 +123,9 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         await self._client.trigger_client_connected()
         if not self._receive_task:
             self._receive_task = self.create_task(self._receive_messages())
+        if not self._silence_audio_task:
+            self._silence_audio_task = self.create_task(self._silence_audio_stream())
+
 
     async def _stop_tasks(self):
         if self._monitor_websocket_task:
@@ -128,6 +134,9 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         if self._receive_task:
             await self.cancel_task(self._receive_task)
             self._receive_task = None
+        if self._silence_audio_task:
+            await self.cancel_task(self._silence_audio_task)
+            self._silence_audio_task = None
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
@@ -139,6 +148,42 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         await self._stop_tasks()
         await self._client.disconnect()
 
+    async def _send_audio_frame(self, frame):
+        
+        self._last_audio_frame_time = time.time()
+        self._started = True
+
+        await self.push_audio_frame(frame)
+    
+    async def _silence_audio_stream(self):
+
+        while True:
+
+            if not self._started:
+                await asyncio.sleep(0.05)
+                continue
+
+            now = time.time()
+            elapsed_since_audio_ms = (now - self._last_audio_frame_time) * 1000  # Convert to ms
+
+            if elapsed_since_audio_ms > 40:
+
+                logger.debug("sending silence")
+
+                audio_bytes_10ms = int(self._params.serializer.sample_rate / 100) * 2
+                silence = b"\x00" * audio_bytes_10ms * 4
+
+                logger.debug(len(silence))
+                
+                audio_frame = InputAudioRawFrame(
+                    audio=silence, num_channels=1, sample_rate=self._sample_rate
+                )
+                await self._send_audio_frame(audio_frame)
+
+            # Sleep for 20ms before checking again.
+            await asyncio.sleep(0.01)
+
+
     async def _receive_messages(self):
         try:
             async for message in self._client.receive():
@@ -148,7 +193,7 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
                     continue
 
                 if isinstance(frame, InputAudioRawFrame):
-                    await self.push_audio_frame(frame)
+                    await self._send_audio_frame(frame)
                 else:
                     await self.push_frame(frame)
         except Exception as e:
