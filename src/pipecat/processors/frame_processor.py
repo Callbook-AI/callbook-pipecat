@@ -178,7 +178,7 @@ class FrameProcessor(BaseObject):
         task_name = task.get_name()
         monitored_task = self._monitored_tasks.get(task_name)
         
-        print("Cancelling task: ", task_name)
+        logger.debug(f"Cancelling task: {task_name}")
         
         if monitored_task: self._monitored_tasks[task_name] = False
 
