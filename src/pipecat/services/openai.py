@@ -24,6 +24,7 @@ from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
 from PIL import Image
 from pydantic import BaseModel, Field
 
+
 from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
@@ -218,6 +219,8 @@ class BaseOpenAILLMService(LLMService):
         )
         logger.debug(f"{self}: Got chat completions and started processing chunks")
         async for chunk in chunk_stream:
+            logger.debug(f"{self}: {chunk}")
+            
             if chunk.usage:
                 tokens = LLMTokenUsage(
                     prompt_tokens=chunk.usage.prompt_tokens,
