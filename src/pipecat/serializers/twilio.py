@@ -44,15 +44,24 @@ class TwilioFrameSerializer(FrameSerializer):
 
         self._resampler = create_default_resampler()
 
+        self._log_messages = False
+
+
     @property
     def type(self) -> FrameSerializerType:
         return FrameSerializerType.TEXT
 
-
     @property
     def sample_rate(self) -> int:
-        """Public property to access the current sample rate."""
         return self._sample_rate
+    
+    @property
+    def log_messages(self) -> bool:
+        return self._log_messages
+
+    @log_messages.setter
+    def log_messages(self, value: bool) -> None:
+        self._log_messages = value
     
     async def setup(self, frame: StartFrame):
         self._sample_rate = self._params.sample_rate or frame.audio_in_sample_rate
@@ -83,6 +92,9 @@ class TwilioFrameSerializer(FrameSerializer):
         message = json.loads(data)
 
         if message["event"] == "media":
+
+            if self._log_messages:
+                logger.debug(message)
 
             payload_base64 = message["media"]["payload"]
             payload = base64.b64decode(payload_base64)
