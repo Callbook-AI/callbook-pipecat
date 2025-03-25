@@ -386,6 +386,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
 
     async def _receive_messages(self):
         async for message in self._get_websocket():
+            
             if not self._started: continue
 
             msg = json.loads(message)
@@ -397,7 +398,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
                 await self.push_frame(frame)
             if msg.get("alignment"):
-                logger.debug("Recieved message from Elevenlabs", msg.get("alignment"))
+                logger.debug(f"Received message from Elevenlabs: {''.join(msg['alignment'].get('chars'))}")
                 word_times = calculate_word_times(msg["alignment"], self._cumulative_time)
                 await self.add_word_timestamps(word_times)
                 self._cumulative_time = word_times[-1][1]

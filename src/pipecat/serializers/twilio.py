@@ -26,6 +26,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.serializers.base_serializer import FrameSerializer, FrameSerializerType
 from loguru import logger
+import struct
 
 
 class TwilioFrameSerializer(FrameSerializer):
@@ -104,3 +105,38 @@ class TwilioFrameSerializer(FrameSerializer):
                 return None
         else:
             return None
+
+
+
+def _simple_vad(audio_data):
+
+    audio_threshold = 100
+
+    total_amplitude = 0
+    sample_count = len(audio_data) // 2
+
+    for i in range(0, len(audio_data), 2):
+        sample = struct.unpack_from("<h", audio_data, i)[0]
+        total_amplitude += abs(sample)
+    
+    avg_amplitude = total_amplitude / sample_count if sample_count > 0 else 0
+
+    return avg_amplitude > audio_threshold
+
+
+# Used to test FastAPIWebsocketInputTransport::_silence_audio_stream
+class TwilioFrameSerializerVAD(TwilioFrameSerializer):
+
+    async def deserialize(self, data: str | bytes) -> Frame | None:
+        
+        frame = await super().deserialize(data)
+
+        if not frame: return frame
+
+        is_speaking = _simple_vad(frame.audio)
+
+        logger.debug(f"Is speaking: {is_speaking}")
+
+        if not is_speaking: return None
+
+        return frame

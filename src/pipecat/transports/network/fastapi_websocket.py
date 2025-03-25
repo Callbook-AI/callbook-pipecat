@@ -155,33 +155,45 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
 
         await self.push_audio_frame(frame)
     
+    
     async def _silence_audio_stream(self):
 
-        while True:
+        activated = False
 
+        while True:
+            
             if not self._started:
                 await asyncio.sleep(0.05)
                 continue
+            
+            await asyncio.sleep(0.01)
 
             now = time.time()
             elapsed_since_audio_ms = (now - self._last_audio_frame_time) * 1000  # Convert to ms
+            audio_bytes_10ms = int(self._params.serializer.sample_rate / 100) * 2
+            
+            silence = None
 
-            if elapsed_since_audio_ms > 40:
-
-                logger.debug("sending silence")
-
-                audio_bytes_10ms = int(self._params.serializer.sample_rate / 100) * 2
+            if activated and elapsed_since_audio_ms > 40:
                 silence = b"\x00" * audio_bytes_10ms * 4
 
-                logger.debug(len(silence))
+            if not activated:
+
+                if elapsed_since_audio_ms < 500:
+                    continue
                 
+                activated = True
+                silence = b"\x00" * audio_bytes_10ms * 50
+
+                logger.debug("Activating silence patch for missing frames in Twilio")
+
+
+            if silence:
+                logger.debug(f"sending silence of: { len(silence) }")
                 audio_frame = InputAudioRawFrame(
                     audio=silence, num_channels=1, sample_rate=self._sample_rate
                 )
                 await self._send_audio_frame(audio_frame)
-
-            # Sleep for 20ms before checking again.
-            await asyncio.sleep(0.01)
 
 
     async def _receive_messages(self):
