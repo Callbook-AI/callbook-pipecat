@@ -6,7 +6,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from loguru import logger
 from pipecat.frames.frames import InputAudioRawFrame, TTSAudioRawFrame, BotSpeakingFrame, OutputAudioRawFrame
 
-# This pipeline is from callbook-pipeline
+# This pipeline is from callbook-pipeline, staging branch
 
 class FrameLogger(FrameProcessor):
 
