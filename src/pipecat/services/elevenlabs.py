@@ -297,10 +297,21 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         if self._websocket:
             msg = {"text": " ", "flush": True}
             await self._websocket.send(json.dumps(msg))
+    
+    
+    async def flush_audio_to_ignore(self):
+
+        if self._started:
+            logger.debug("Flushing to ignore")
+            self._started = False
+            await self.flush_audio()
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
         if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
+
+            await self.flush_audio_to_ignore()
+
             self._started = False
             if isinstance(frame, TTSStoppedFrame):
                 await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
