@@ -15,7 +15,6 @@ from websockets.protocol import State
 from pipecat.frames.frames import ErrorFrame
 from pipecat.utils.network import exponential_backoff_time
 
-
 class WebsocketService(ABC):
     """Base class for websocket-based services with reconnection logic."""
 
@@ -79,7 +78,7 @@ class WebsocketService(ABC):
                     await report_error(ErrorFrame(message, fatal=True))
                     break
 
-                logger.warning(f"{self} connection error, will retry: {e}")
+                logger.exception(f"{self} connection error, will retry: {e}",)
 
                 try:
                     if await self._reconnect_websocket(retry_count):
