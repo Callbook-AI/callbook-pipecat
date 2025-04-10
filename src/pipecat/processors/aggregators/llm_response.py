@@ -8,6 +8,8 @@ import asyncio
 import time
 from abc import abstractmethod
 from typing import List
+from loguru import logger
+
 
 from pipecat.frames.frames import (
     CancelFrame,
@@ -456,6 +458,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     async def _handle_llm_end(self, _: LLMFullResponseEndFrame):
         self._started = False
+        logger.debug("Aggregating because LLMFullResponseEndFrame")
         await self.push_aggregation()
 
     async def _handle_text(self, frame: TextFrame):

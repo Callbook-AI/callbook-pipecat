@@ -282,6 +282,8 @@ class BaseOutputTransport(FrameProcessor):
                 # If we have a frame we check it's presentation timestamp. If it
                 # has already passed we process it, otherwise we wait until it's
                 # time to process it.
+                logger.debug(f"Pushing frame: {frame}")
+
                 if running:
                     current_time = self.get_clock().get_time()
                     if timestamp > current_time:
