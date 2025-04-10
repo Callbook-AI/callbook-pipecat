@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import time
 import asyncio
 from typing import AsyncGenerator, Dict, Optional
 
@@ -49,6 +50,9 @@ except ModuleNotFoundError as e:
         "In order to use Deepgram, you need to `pip install pipecat-ai[deepgram]`. Also, set `DEEPGRAM_API_KEY` environment variable."
     )
     raise Exception(f"Missing module: {e}")
+
+
+DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3
 
 
 class DeepgramTTSService(TTSService):
@@ -123,6 +127,7 @@ class DeepgramSTTService(STTService):
         api_key: str,
         url: str = "",
         sample_rate: Optional[int] = None,
+        on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS,
         live_options: Optional[LiveOptions] = None,
         addons: Optional[Dict] = None,
         **kwargs,
@@ -156,6 +161,7 @@ class DeepgramSTTService(STTService):
         self._addons = addons
         self._user_speaking = False
         self._bot_speaking = True
+        self._on_no_punctuation_seconds = on_no_punctuation_seconds
 
 
         self._client = DeepgramClient(
@@ -169,6 +175,11 @@ class DeepgramSTTService(STTService):
         if self.vad_enabled:
             self._register_event_handler("on_speech_started")
             self._register_event_handler("on_utterance_end")
+
+        self._transcription_accum_task = None
+        self._accum_transcription_frames = []
+        self._last_time_accum_transcription = time.time()
+        
 
     @property
     def vad_enabled(self):
@@ -217,6 +228,9 @@ class DeepgramSTTService(STTService):
         )
         self._connection.on(LiveTranscriptionEvents(LiveTranscriptionEvents.Error), self._on_error)
 
+        if not self._transcription_accum_task:
+            self._transcription_accum_task = self.create_monitored_task(self._transcription_accum)
+
         if self.vad_enabled:
             self._connection.on(
                 LiveTranscriptionEvents(LiveTranscriptionEvents.SpeechStarted),
@@ -231,6 +245,10 @@ class DeepgramSTTService(STTService):
             logger.error(f"{self}: unable to connect to Deepgram")
 
     async def _disconnect(self):
+
+        if self._transcription_accum_task:
+            await self.cancel_task(self._transcription_accum_task)
+
         if self._connection.is_connected:
             logger.debug("Disconnecting from Deepgram")
             await self._connection.finish()
@@ -257,12 +275,12 @@ class DeepgramSTTService(STTService):
 
 
     async def _handle_user_speaking(self):
-        
+
+        await self.push_frame(StartInterruptionFrame())
         if self._user_speaking == True: return
 
         self._user_speaking = True
 
-        await self.push_frame(StartInterruptionFrame())
         await self.push_frame(UserStartedSpeakingFrame())
 
     async def _handle_user_silence(self):
@@ -283,6 +301,52 @@ class DeepgramSTTService(STTService):
     def _transcript_words_count(self, transcript: str):
         return len(transcript.split(" "))
     
+    async def _transcription_accum(self, task_name):
+
+        while True:
+            if not self.is_monitored_task_active(task_name): return
+
+            await asyncio.sleep(0.1)
+            
+            current_time = time.time()
+
+            if current_time - self._last_time_accum_transcription > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
+                logger.debug("Sending accum transcription because of timeout")
+                await self._send_accum_transcriptions()
+
+            
+
+
+
+    async def _send_accum_transcriptions(self):
+
+        if not len(self._accum_transcription_frames): return
+
+        await self._handle_user_speaking()
+
+        for frame in self._accum_transcription_frames:
+            await self.push_frame(
+                frame
+            )
+        self._accum_transcription_frames = []
+
+        await self._handle_user_silence()
+        await self.stop_processing_metrics()
+
+    def _is_accum_transcription(self, text: str):
+
+        END_OF_PHRASE_CHARACTERS = ['.', '?']
+
+        text =  text.strip()
+
+        if not text: return True
+
+        return not text[-1] in END_OF_PHRASE_CHARACTERS
+    
+    def _append_accum_transcription(self, frame: TranscriptionFrame):
+        self._last_time_accum_transcription = time.time()
+        self._accum_transcription_frames.append(frame)
+
     async def _on_final_transcript_message(self, transcript, language):
 
         if self._bot_speaking and self._transcript_words_count(transcript) == 1: 
@@ -290,11 +354,11 @@ class DeepgramSTTService(STTService):
             return
 
         await self._handle_user_speaking()
-        await self.push_frame(
-            TranscriptionFrame(transcript, "", time_now_iso8601(), language)
-        )
-        await self._handle_user_silence()
-        await self.stop_processing_metrics()
+        frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
+
+        self._append_accum_transcription(frame)
+        if not self._is_accum_transcription(frame.text):
+            await self._send_accum_transcriptions()
     
     async def _on_interim_transcript_message(self, transcript, language):
 
