@@ -394,7 +394,7 @@ class DeepgramSTTService(STTService):
             if is_final:
                 await self._on_final_transcript_message(transcript, language)
             else:
-                if confidence > 0.5:
+                if confidence > 0.7:
                     await self._on_interim_transcript_message(transcript, language)
                 else:
                     logger.debug("Ignoring iterim because low confidence")
