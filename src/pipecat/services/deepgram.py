@@ -371,13 +371,16 @@ class DeepgramSTTService(STTService):
             InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
         )
 
-
     async def _on_message(self, *args, **kwargs):
         result: LiveResultResponse = kwargs["result"]
+
+        logger.debug(result)
+
         if len(result.channel.alternatives) == 0:
             return
         is_final = result.is_final
         transcript = result.channel.alternatives[0].transcript
+        confidence = result.channel.alternatives[0].confidence
         language = None
         if result.channel.alternatives[0].languages:
             language = result.channel.alternatives[0].languages[0]
@@ -386,11 +389,15 @@ class DeepgramSTTService(STTService):
             await self.stop_ttfb_metrics()
 
             logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
+            logger.debug(f"Confidence: {confidence}")
 
             if is_final:
                 await self._on_final_transcript_message(transcript, language)
             else:
-                await self._on_interim_transcript_message(transcript, language)
+                if confidence > 0.5:
+                    await self._on_interim_transcript_message(transcript, language)
+                else:
+                    logger.debug("Ignoring iterim because low confidence")
                 
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
