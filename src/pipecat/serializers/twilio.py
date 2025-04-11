@@ -113,6 +113,8 @@ class TwilioFrameSerializer(FrameSerializer):
 
         if message["event"] == "media":
 
+            self._detect_high_loss_frames(message)
+
             if self._log_messages:
                 logger.debug(message)
 
