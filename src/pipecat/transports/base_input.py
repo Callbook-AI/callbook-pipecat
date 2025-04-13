@@ -27,6 +27,8 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
     VADParamsUpdateFrame,
+    VADActiveFrame,
+    VADInactiveFrame
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.base_transport import TransportParams
@@ -191,12 +193,14 @@ class BaseInputTransport(FrameProcessor):
         ):
             frame = None
             if new_vad_state == VADState.SPEAKING:
-                frame = UserStartedSpeakingFrame()
+                logger.debug("VAD active")
+                frame = VADActiveFrame()
             elif new_vad_state == VADState.QUIET:
-                frame = UserStoppedSpeakingFrame()
+                logger.debug("VAD inactive")
+                frame = VADInactiveFrame()
 
             if frame:
-                await self._handle_user_interruption(frame)
+                await self.push_frame(frame)
 
             vad_state = new_vad_state
         return vad_state
