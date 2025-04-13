@@ -179,11 +179,11 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
 
             if not activated:
 
-                if elapsed_since_audio_ms < 500:
+                if not self._params.serializer._high_loss_frames:
                     continue
                 
                 activated = True
-                silence = b"\x00" * audio_bytes_10ms * 50
+                silence = b"\x00" * audio_bytes_10ms * (elapsed_since_audio_ms / 10)
                 self._params.serializer.log_messages = True
 
                 logger.debug("Activating silence patch for missing frames in Twilio")

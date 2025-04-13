@@ -45,6 +45,9 @@ class TwilioFrameSerializer(FrameSerializer):
         self._resampler = create_default_resampler()
 
         self._log_messages = False
+        self._last_timestamp = 0
+
+        self._high_loss_frames = False
 
 
     @property
@@ -65,6 +68,23 @@ class TwilioFrameSerializer(FrameSerializer):
     
     async def setup(self, frame: StartFrame):
         self._sample_rate = self._params.sample_rate or frame.audio_in_sample_rate
+
+    def _detect_high_loss_frames(self, message: dict):
+
+        if self._high_loss_frames: return
+        
+        timestamp = int(message["media"]["timestamp"])
+
+        if not self._last_timestamp:
+            self._last_timestamp = timestamp
+
+        timestamp_diff = timestamp - self._last_timestamp
+        
+        if timestamp > 3000 and timestamp_diff > 150:
+            self._high_loss_frames = True
+        
+        self._last_timestamp = timestamp
+
 
     async def serialize(self, frame: Frame) -> str | bytes | None:
         if isinstance(frame, StartInterruptionFrame):
@@ -92,6 +112,8 @@ class TwilioFrameSerializer(FrameSerializer):
         message = json.loads(data)
 
         if message["event"] == "media":
+
+            self._detect_high_loss_frames(message)
 
             if self._log_messages:
                 logger.debug(message)
