@@ -398,7 +398,9 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
     async def _receive_messages(self):
         async for message in self._get_websocket():
             
-            if not self._started: continue
+            if not self._started: 
+                logger.debug("Ignoring message, not started")
+                continue
 
             msg = json.loads(message)
             if msg.get("audio"):

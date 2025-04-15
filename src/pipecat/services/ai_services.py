@@ -450,6 +450,7 @@ class TTSService(AIService):
                     has_started = False
             except asyncio.TimeoutError:
                 if has_started:
+                    logger.debug("Timeout")
                     await self.push_frame(TTSStoppedFrame())
                     has_started = False
 
