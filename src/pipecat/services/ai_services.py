@@ -229,7 +229,7 @@ class TTSService(AIService):
         # if True, TTSService will push TTSStoppedFrames, otherwise subclass must do it
         push_stop_frames: bool = False,
         # if push_stop_frames is True, wait for this idle period before pushing TTSStoppedFrame
-        stop_frame_timeout_s: float = 3.0,
+        stop_frame_timeout_s: float = 1.0,
         # if True, TTSService will push silence audio frames after TTSStoppedFrame
         push_silence_after_stop: bool = False,
         # if push_silence_after_stop is True, send this amount of audio silence
@@ -451,7 +451,8 @@ class TTSService(AIService):
             except asyncio.TimeoutError:
                 if has_started:
                     logger.debug("Timeout")
-                    await self.push_frame(TTSStoppedFrame())
+                    await self.flush_audio()
+                    #await self.push_frame(TTSStoppedFrame())
                     has_started = False
 
 
