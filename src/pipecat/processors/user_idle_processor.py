@@ -15,6 +15,8 @@ from pipecat.frames.frames import (
     Frame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    VADActiveFrame,
+    VADInactiveFrame
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
@@ -144,11 +146,11 @@ class UserIdleProcessor(FrameProcessor):
         # Only process these events if conversation has started
         if self._conversation_started:
             # We shouldn't call the idle callback if the user or the bot are speaking
-            if isinstance(frame, UserStartedSpeakingFrame):
+            if isinstance(frame, (UserStartedSpeakingFrame, VADActiveFrame)):
                 self._retry_count = 0  # Reset retry count when user speaks
                 self._interrupted = True
                 self._idle_event.set()
-            elif isinstance(frame, UserStoppedSpeakingFrame):
+            elif isinstance(frame, (UserStoppedSpeakingFrame, VADInactiveFrame)):
                 self._interrupted = False
                 self._idle_event.set()
             elif isinstance(frame, BotSpeakingFrame):
