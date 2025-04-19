@@ -316,11 +316,7 @@ class DeepgramSTTService(STTService):
             if current_time - self._last_time_accum_transcription > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
                 logger.debug("Sending accum transcription because of timeout")
                 await self._send_accum_transcriptions()
-
-            
-
-
-
+    
     async def _send_accum_transcriptions(self):
 
         if not len(self._accum_transcription_frames): return
@@ -374,6 +370,23 @@ class DeepgramSTTService(STTService):
             InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
         )
 
+    async def _should_ignore_transcription(self, result: LiveResultResponse):
+
+        is_final = result.is_final
+        confidence = result.channel.alternatives[0].confidence
+        transcript = result.channel.alternatives[0].transcript
+        time_start = result.start
+
+        if not is_final and confidence < 0.7:
+            logger.debug("Ignoring iterim because low confidence")
+            return True
+
+        if time_start < 1 and self._transcript_words_count(transcript) == 1:
+            logger.debug("Ignoring first message, fast greeting")
+            return True 
+
+        return False
+    
 
     async def _on_message(self, *args, **kwargs):
         result: LiveResultResponse = kwargs["result"]
@@ -396,13 +409,13 @@ class DeepgramSTTService(STTService):
             logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
             logger.debug(f"Confidence: {confidence}")
 
+            if await self._should_ignore_transcription(result):
+                return
+
             if is_final:
                 await self._on_final_transcript_message(transcript, language, speech_final)
             else:
-                if confidence > 0.7:
-                    await self._on_interim_transcript_message(transcript, language)
-                else:
-                    logger.debug("Ignoring iterim because low confidence")
+                await self._on_interim_transcript_message(transcript, language)
                 
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
