@@ -350,13 +350,13 @@ class DeepgramSTTService(STTService):
         self._last_time_accum_transcription = time.time()
         self._accum_transcription_frames.append(frame)
 
-    async def _on_final_transcript_message(self, transcript, language):
+    async def _on_final_transcript_message(self, transcript, language, speech_final: bool):
 
         await self._handle_user_speaking()
         frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
 
         self._append_accum_transcription(frame)
-        if not self._is_accum_transcription(frame.text):
+        if not self._is_accum_transcription(frame.text) or speech_final:
             await self._send_accum_transcriptions()
     
     async def _on_interim_transcript_message(self, transcript, language):
@@ -383,6 +383,7 @@ class DeepgramSTTService(STTService):
         if len(result.channel.alternatives) == 0:
             return
         is_final = result.is_final
+        speech_final = result.speech_final
         transcript = result.channel.alternatives[0].transcript
         confidence = result.channel.alternatives[0].confidence
         language = None
@@ -396,7 +397,7 @@ class DeepgramSTTService(STTService):
             logger.debug(f"Confidence: {confidence}")
 
             if is_final:
-                await self._on_final_transcript_message(transcript, language)
+                await self._on_final_transcript_message(transcript, language, speech_final)
             else:
                 if confidence > 0.7:
                     await self._on_interim_transcript_message(transcript, language)
