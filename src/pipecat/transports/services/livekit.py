@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import time
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List, Optional
@@ -17,9 +18,11 @@ from pipecat.frames.frames import (
     AudioRawFrame,
     CancelFrame,
     EndFrame,
+    Frame,
     InputAudioRawFrame,
     OutputAudioRawFrame,
     StartFrame,
+    StartInterruptionFrame,
     TransportMessageFrame,
     TransportMessageUrgentFrame,
 )
@@ -417,12 +420,16 @@ class LiveKitOutputTransport(BaseOutputTransport):
     def __init__(self, client: LiveKitTransportClient, params: LiveKitParams, **kwargs):
         super().__init__(params, **kwargs)
         self._client = client
+        self._send_interval = 0
+        self._next_send_time = 0
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
         await self._client.setup(frame)
         await self._client.connect()
+        self._send_interval = (self._audio_chunk_size / self.sample_rate) / 2
         logger.info("LiveKitOutputTransport started")
+        print("SEND INTERVAL", self._send_interval)
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
@@ -433,6 +440,13 @@ class LiveKitOutputTransport(BaseOutputTransport):
         await super().cancel(frame)
         await self._client.disconnect()
 
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, StartInterruptionFrame):
+            #await self._write_frame(frame)
+            self._next_send_time = 0
+
     async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
         if isinstance(frame, (LiveKitTransportMessageFrame, LiveKitTransportMessageUrgentFrame)):
             await self._client.send_data(frame.message.encode(), frame.participant_id)
@@ -440,8 +454,15 @@ class LiveKitOutputTransport(BaseOutputTransport):
             await self._client.send_data(frame.message.encode())
 
     async def write_raw_audio_frames(self, frames: bytes):
+
+        if not self._client._connected:
+            await self._write_audio_sleep()
+            return
+
         livekit_audio = self._convert_pipecat_audio_to_livekit(frames)
         await self._client.publish_audio(livekit_audio)
+        await self._write_audio_sleep()
+
 
     def _convert_pipecat_audio_to_livekit(self, pipecat_audio: bytes) -> rtc.AudioFrame:
         bytes_per_sample = 2  # Assuming 16-bit audio
@@ -454,6 +475,18 @@ class LiveKitOutputTransport(BaseOutputTransport):
             num_channels=self._params.audio_out_channels,
             samples_per_channel=samples_per_channel,
         )
+
+    async def _write_audio_sleep(self):
+        if not self._send_interval:
+            self._send_interval = 0.02
+        # Simulate a clock.
+        current_time = time.monotonic()
+        sleep_duration = max(0, self._next_send_time - current_time)
+        await asyncio.sleep(sleep_duration)
+        if sleep_duration == 0:
+            self._next_send_time = time.monotonic() + self._send_interval
+        else:
+            self._next_send_time += self._send_interval
 
 
 class LiveKitTransport(BaseTransport):
