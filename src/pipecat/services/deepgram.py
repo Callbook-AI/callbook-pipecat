@@ -33,6 +33,7 @@ from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_services import STTService, TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
+from pipecat.utils.rex import regex_list_matches
 
 # See .env.example for Deepgram configuration needed
 try:
@@ -55,6 +56,16 @@ except ModuleNotFoundError as e:
 
 
 DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3
+
+
+
+SENSIBLE_AND_FAST_RESPONSE_WORDS = {
+    "it": [
+        "(?i)\bsi[ìí]?\b[.,!?]?",
+    ]
+}
+
+
 
 
 class DeepgramTTSService(TTSService):
@@ -165,6 +176,11 @@ class DeepgramSTTService(STTService):
         self._bot_speaking = True
         self._on_no_punctuation_seconds = on_no_punctuation_seconds
         self._vad_active = False
+        self.sensible_and_fast_response_words = SENSIBLE_AND_FAST_RESPONSE_WORDS.get(
+            self._settings["language"], []
+            )
+        self._ignore_transcriptions_by_time = set()
+
 
         self._client = DeepgramClient(
             api_key,
@@ -354,8 +370,22 @@ class DeepgramSTTService(STTService):
         self._append_accum_transcription(frame)
         if not self._is_accum_transcription(frame.text) or speech_final:
             await self._send_accum_transcriptions()
+
+    async def _handle_sensible_and_fast_response_words(self, transcript: str, language: Language,  start_time: float):
+
+        if not regex_list_matches(transcript, self.sensible_and_fast_response_words):
+            return False
+        
+        logger.debug("Sensible and fast response word detected")
+
+        self._ignore_transcriptions_by_time.add(start_time)
+
+        await self._on_final_transcript_message(transcript, language,)
+
+
+        return True
     
-    async def _on_interim_transcript_message(self, transcript, language):
+    async def _on_interim_transcript_message(self, transcript, language, start_time):
 
         if self._bot_speaking and self._transcript_words_count(transcript) == 1: 
             logger.debug(f"Ignoring Deepgram interruption because bot is speaking: {transcript}")
@@ -384,6 +414,10 @@ class DeepgramSTTService(STTService):
         if time_start < 1 and self._transcript_words_count(transcript) == 1:
             logger.debug("Ignoring first message, fast greeting")
             return True 
+        
+        if time_start in self._ignore_transcriptions_by_time:
+            logger.debug("Ignoring because previous sensible word was handled")
+            return True
 
         return False
     
@@ -399,6 +433,7 @@ class DeepgramSTTService(STTService):
         speech_final = result.speech_final
         transcript = result.channel.alternatives[0].transcript
         confidence = result.channel.alternatives[0].confidence
+        start_time = result.start
         language = None
         if result.channel.alternatives[0].languages:
             language = result.channel.alternatives[0].languages[0]
@@ -415,7 +450,7 @@ class DeepgramSTTService(STTService):
             if is_final:
                 await self._on_final_transcript_message(transcript, language, speech_final)
             else:
-                await self._on_interim_transcript_message(transcript, language)
+                await self._on_interim_transcript_message(transcript, language, start_time)
                 
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
