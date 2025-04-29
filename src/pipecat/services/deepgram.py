@@ -4,9 +4,11 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import re
 import time
 import asyncio
-from typing import AsyncGenerator, Dict, Optional
+from typing import AsyncGenerator, Dict, Optional, Callable
+
 
 from loguru import logger
 
@@ -57,13 +59,6 @@ except ModuleNotFoundError as e:
 
 DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3
 
-
-
-SENSIBLE_AND_FAST_RESPONSE_WORDS = {
-    "it": [
-        "(?i)\bsi[ìí]?\b[.,!?]?",
-    ]
-}
 
 
 
@@ -133,6 +128,98 @@ class DeepgramTTSService(TTSService):
             yield ErrorFrame(f"Error getting audio: {str(e)}")
 
 
+class DeepgramSiDetector:
+    """
+    Connects to Deepgram in Spanish, streams raw audio,
+    and calls `callback(transcript)` whenever a final
+    transcript contains "si", "sí", "si!", "sí!", etc.
+    """
+    def __init__(
+        self,
+        api_key: str,
+        callback: Callable[[str], None],
+        url: str = "wss://api.deepgram.com/v1/listen",
+        sample_rate: int = 16_000,
+    ):
+        # callback to invoke on detection
+        self._callback = callback
+        # match standalone si or sí (case-insensitive), optional !/¡
+        self._pattern = re.compile(r'\b(?:si|sí)\b[!¡]?', re.IGNORECASE)
+
+        # build a Deepgram client
+        self._client = DeepgramClient(
+            api_key,
+            config=DeepgramClientOptions(
+                url=url,
+                options={"keepalive": "true"}
+            ),
+        )
+
+        # settings for Spanish transcription
+        self._settings = {
+            "encoding":       "linear16",
+            "language":       "es",          # Spanish
+            "model":          "general",
+            "sample_rate":    sample_rate,
+            "interim_results": False,        # only finals
+            "punctuate":      True,
+        }
+
+        self._conn = None  # will hold the websocket client
+        self.start_times = set()
+
+    async def start(self):
+        """
+        Open the Deepgram websocket. Must be called before sending audio.
+        """
+        self._conn = self._client.listen.asyncwebsocket.v("1")
+        self._conn.on(
+            LiveTranscriptionEvents.Transcript,
+            self._on_transcript_event
+        )
+        await self._conn.start(options=self._settings)
+
+    async def send_audio(self, chunk: bytes):
+        """
+        Send a chunk of raw audio (bytes) to Deepgram.
+        """
+        if not self._conn or not self._conn.is_connected:
+            raise RuntimeError("Connection not started. Call start() first.")
+        await self._conn.send(chunk)
+
+    async def stop(self):
+        """
+        Gracefully close the Deepgram websocket when you’re done sending.
+        """
+        if self._conn and self._conn.is_connected:
+            await self._conn.finish()
+
+    async def _on_transcript_event(self, *args, **kwargs):
+        """
+        Internal handler for every transcription event.
+        Filters down to final transcripts and applies the "si" regex.
+        """
+        result = kwargs.get("result")
+        if not result:
+            return
+
+        alts = result.channel.alternatives
+        if not alts:
+            return
+
+        transcript = alts[0].transcript.strip()
+        if self._pattern.search(transcript):
+
+            if result.start in self.start_times: return
+            logger.debug("Si detected")
+            
+            self.start_times.add(result.start)
+            
+            logger.debug("Si detected")
+
+            await self._callback(result)
+
+
 class DeepgramSTTService(STTService):
     def __init__(
         self,
@@ -169,6 +256,9 @@ class DeepgramSTTService(STTService):
             merged_options.language, "value"
         ):
             merged_options.language = merged_options.language.value
+        
+        self.language = merged_options.language
+        self.api_key = api_key
 
         self._settings = merged_options.to_dict()
         self._addons = addons
@@ -176,10 +266,8 @@ class DeepgramSTTService(STTService):
         self._bot_speaking = True
         self._on_no_punctuation_seconds = on_no_punctuation_seconds
         self._vad_active = False
-        self.sensible_and_fast_response_words = SENSIBLE_AND_FAST_RESPONSE_WORDS.get(
-            self._settings["language"], []
-            )
-        self._ignore_transcriptions_by_time = set()
+
+        self._setup_sibling_deepgram()
 
 
         self._client = DeepgramClient(
@@ -198,11 +286,33 @@ class DeepgramSTTService(STTService):
         self._transcription_accum_task = None
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
+        self._last_time_transcription = time.time()
         
 
     @property
     def vad_enabled(self):
         return self._settings["vad_events"]
+    
+    def _setup_sibling_deepgram(self):
+
+        self._sibling_deepgram = None
+
+        if self.language != 'it': return 
+
+        self._sibling_deepgram = DeepgramSiDetector(self.api_key, self.sibling_transcript_handler)
+
+
+    async def sibling_transcript_handler(self, result: LiveResultResponse):
+
+        result_time = result.start
+
+        if abs(self._last_time_transcription - result_time) < 0.5:
+            logger.debug("Ignoring 'Si' because recent transcript")
+            return
+        
+        await self._on_message(result=result)
+
+
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -225,16 +335,28 @@ class DeepgramSTTService(STTService):
         self._settings["sample_rate"] = self.sample_rate
         await self._connect()
 
+        if self._sibling_deepgram:
+            await self._sibling_deepgram.start()
+
     async def stop(self, frame: EndFrame):
+
         await super().stop(frame)
         await self._disconnect()
 
+        if self._sibling_deepgram:
+            await self._sibling_deepgram.stop()
+
     async def cancel(self, frame: CancelFrame):
+
+
+
         await super().cancel(frame)
         await self._disconnect()
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
         await self._connection.send(audio)
+        if self._sibling_deepgram:
+            await self._sibling_deepgram.send_audio(audio)
         yield None
 
     async def _connect(self):
@@ -370,20 +492,6 @@ class DeepgramSTTService(STTService):
         self._append_accum_transcription(frame)
         if not self._is_accum_transcription(frame.text) or speech_final:
             await self._send_accum_transcriptions()
-
-    async def _handle_sensible_and_fast_response_words(self, transcript: str, language: Language,  start_time: float):
-
-        if not regex_list_matches(transcript, self.sensible_and_fast_response_words):
-            return False
-        
-        logger.debug("Sensible and fast response word detected")
-
-        self._ignore_transcriptions_by_time.add(start_time)
-
-        await self._on_final_transcript_message(transcript, language,)
-
-
-        return True
     
     async def _on_interim_transcript_message(self, transcript, language, start_time):
 
@@ -413,10 +521,6 @@ class DeepgramSTTService(STTService):
 
         if time_start < 1 and self._transcript_words_count(transcript) == 1:
             logger.debug("Ignoring first message, fast greeting")
-            return True 
-        
-        if time_start in self._ignore_transcriptions_by_time:
-            logger.debug("Ignoring because previous sensible word was handled")
             return True
 
         return False
@@ -449,6 +553,7 @@ class DeepgramSTTService(STTService):
 
             if is_final:
                 await self._on_final_transcript_message(transcript, language, speech_final)
+                self._last_time_transcription = start_time
             else:
                 await self._on_interim_transcript_message(transcript, language, start_time)
                 
