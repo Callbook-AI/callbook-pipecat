@@ -36,6 +36,7 @@ from pipecat.services.ai_services import STTService, TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.rex import regex_list_matches
+from pipecat.utils.string import is_equivalent_basic
 
 # See .env.example for Deepgram configuration needed
 try:
@@ -58,7 +59,7 @@ except ModuleNotFoundError as e:
 
 
 DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3
-
+IGNORE_REPEATED_MSG_AT_START_SECONDS = 4
 
 
 
@@ -267,6 +268,10 @@ class DeepgramSTTService(STTService):
         self._on_no_punctuation_seconds = on_no_punctuation_seconds
         self._vad_active = False
 
+        self._first_message = None
+        self._first_message_time = None
+
+
         self._setup_sibling_deepgram()
 
 
@@ -287,6 +292,8 @@ class DeepgramSTTService(STTService):
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
         self._last_time_transcription = time.time()
+
+        self.start_time = time.time()
         
 
     @property
@@ -313,6 +320,8 @@ class DeepgramSTTService(STTService):
         await self._on_message(result=result)
 
 
+    def _time_since_init(self):
+        return time.time() - self.start_time
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -347,8 +356,6 @@ class DeepgramSTTService(STTService):
             await self._sibling_deepgram.stop()
 
     async def cancel(self, frame: CancelFrame):
-
-
 
         await super().cancel(frame)
         await self._disconnect()
@@ -484,11 +491,32 @@ class DeepgramSTTService(STTService):
         self._last_time_accum_transcription = time.time()
         self._accum_transcription_frames.append(frame)
 
+
+    def _handle_first_message(self, text):
+
+        if self._first_message: return 
+
+        self._first_message = text
+        self._first_message_time = time.time()
+
+    def _should_ignore_first_repeated_message(self, text):
+
+        if not self._first_message: return
+        
+        time_since_first_message = time.time() - self._first_message_time
+        if time_since_first_message > IGNORE_REPEATED_MSG_AT_START_SECONDS:
+            return False
+        
+        return is_equivalent_basic(text, self._first_message)
+
+
+
     async def _on_final_transcript_message(self, transcript, language, speech_final: bool):
 
         await self._handle_user_speaking()
         frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
 
+        self._handle_first_message(frame.text)
         self._append_accum_transcription(frame)
         if not self._is_accum_transcription(frame.text) or speech_final:
             await self._send_accum_transcriptions()
@@ -521,6 +549,10 @@ class DeepgramSTTService(STTService):
 
         if time_start < 1 and self._transcript_words_count(transcript) == 1:
             logger.debug("Ignoring first message, fast greeting")
+            return True
+        
+        if self._should_ignore_first_repeated_message(transcript):
+            logger.debug("Ignoring repeated first message")
             return True
 
         return False
