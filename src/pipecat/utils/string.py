@@ -5,6 +5,8 @@
 #
 
 import re
+import unicodedata
+
 
 ENDOFSENTENCE_PATTERN_STR = r"""
     (?<![A-Z])       # Negative lookbehind: not preceded by an uppercase letter (e.g., "U.S.A.")
@@ -23,3 +25,16 @@ ENDOFSENTENCE_PATTERN = re.compile(ENDOFSENTENCE_PATTERN_STR, re.VERBOSE)
 def match_endofsentence(text: str) -> int:
     match = ENDOFSENTENCE_PATTERN.search(text.rstrip())
     return match.end() if match else 0
+
+
+
+def normalize_text(text):
+    # Remove accents
+    text = unicodedata.normalize('NFD', text)
+    text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+    # Remove punctuation and lowercase
+    text = re.sub(r'[^\w\s]', '', text).lower().strip()
+    return text
+
+def is_equivalent_basic(text1, text2):
+    return normalize_text(text1) == normalize_text(text2)
