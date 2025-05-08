@@ -38,8 +38,8 @@ from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.rex import regex_list_matches
 from pipecat.utils.string import is_equivalent_basic
+from pipecat.utils.text import voicemail
 
-import voicemail
 
 # See .env.example for Deepgram configuration needed
 try:
@@ -584,11 +584,9 @@ class DeepgramSTTService(STTService):
         result: LiveResultResponse = kwargs["result"]
 
         logger.debug(result)
-        logger.debug("xxx")
 
         if len(result.channel.alternatives) == 0:
             return
-        logger.debug("yyy")
         
         is_final = result.is_final
         speech_final = result.speech_final
@@ -600,9 +598,8 @@ class DeepgramSTTService(STTService):
             language = result.channel.alternatives[0].languages[0]
             language = Language(language)
         if len(transcript) > 0:
-            logger.debug("zzz")
 
-            #await self.stop_ttfb_metrics()
+            await self.stop_ttfb_metrics()
 
             await self._detect_and_handle_voicemail(transcript)
 
