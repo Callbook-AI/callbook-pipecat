@@ -18,6 +18,7 @@ from pipecat.frames.frames import (
     TranscriptionMessage,
     TranscriptionUpdateFrame,
     TTSTextFrame,
+    VoicemailFrame
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.utils.time import time_now_iso8601
@@ -34,6 +35,7 @@ class BaseTranscriptProcessor(FrameProcessor):
         super().__init__(**kwargs)
         self._processed_messages: List[TranscriptionMessage] = []
         self._register_event_handler("on_transcript_update")
+        self._register_event_handler("on_voicemail")
 
     async def _emit_update(self, messages: List[TranscriptionMessage]):
         """Emit transcript updates for new messages.
@@ -46,6 +48,9 @@ class BaseTranscriptProcessor(FrameProcessor):
             update_frame = TranscriptionUpdateFrame(messages=messages)
             await self._call_event_handler("on_transcript_update", update_frame)
             await self.push_frame(update_frame)
+
+    async def _emit_voicemail(self, voicemail_frame: VoicemailFrame):
+        await self._call_event_handler("on_voicemail", voicemail_frame)
 
 
 class UserTranscriptProcessor(BaseTranscriptProcessor):
@@ -65,6 +70,10 @@ class UserTranscriptProcessor(BaseTranscriptProcessor):
                 role="user", content=frame.text, timestamp=frame.timestamp
             )
             await self._emit_update([message])
+
+        if isinstance(frame, VoicemailFrame):
+            logger.debug("Voicemail received")
+            await self._emit_voicemail(frame)
 
         await self.push_frame(frame, direction)
 

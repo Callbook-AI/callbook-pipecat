@@ -257,6 +257,13 @@ class InterimTranscriptionFrame(TextFrame):
 
 
 @dataclass
+class VoicemailFrame(Frame):
+    text: str
+
+    def __str__(self):
+        return F"{self.name}(text: [{self.text}])"
+
+@dataclass
 class OpenAILLMContextAssistantTimestampFrame(DataFrame):
     """Timestamp information for assistant message in LLM context."""
 

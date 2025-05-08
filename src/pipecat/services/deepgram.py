@@ -29,7 +29,8 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
     VADActiveFrame,
-    VADInactiveFrame
+    VADInactiveFrame,
+    VoicemailFrame
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_services import STTService, TTSService
@@ -37,6 +38,8 @@ from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.rex import regex_list_matches
 from pipecat.utils.string import is_equivalent_basic
+
+import voicemail
 
 # See .env.example for Deepgram configuration needed
 try:
@@ -60,7 +63,7 @@ except ModuleNotFoundError as e:
 
 DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3
 IGNORE_REPEATED_MSG_AT_START_SECONDS = 4
-
+VOICEMAIL_DETECTION_SECONDS = 10
 
 
 
@@ -558,13 +561,35 @@ class DeepgramSTTService(STTService):
         return False
     
 
+    async def _detect_and_handle_voicemail(self, transcript: str):
+
+        logger.debug(transcript)
+        logger.debug(self._time_since_init())
+
+        if self._time_since_init() > VOICEMAIL_DETECTION_SECONDS: return
+        
+        if not voicemail.is_text_voicemail(transcript): return 
+        
+        logger.debug("Voicemail detected")
+
+        await self.push_frame(
+            VoicemailFrame(transcript)
+        )
+
+        logger.debug("Voicemail pushed")
+
+
+
     async def _on_message(self, *args, **kwargs):
         result: LiveResultResponse = kwargs["result"]
 
         logger.debug(result)
+        logger.debug("xxx")
 
         if len(result.channel.alternatives) == 0:
             return
+        logger.debug("yyy")
+        
         is_final = result.is_final
         speech_final = result.speech_final
         transcript = result.channel.alternatives[0].transcript
@@ -575,7 +600,11 @@ class DeepgramSTTService(STTService):
             language = result.channel.alternatives[0].languages[0]
             language = Language(language)
         if len(transcript) > 0:
-            await self.stop_ttfb_metrics()
+            logger.debug("zzz")
+
+            #await self.stop_ttfb_metrics()
+
+            await self._detect_and_handle_voicemail(transcript)
 
             logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
             logger.debug(f"Confidence: {confidence}")
