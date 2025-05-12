@@ -234,6 +234,7 @@ class DeepgramSTTService(STTService):
         on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS,
         live_options: Optional[LiveOptions] = None,
         addons: Optional[Dict] = None,
+        inbound_call: bool = False,  
         **kwargs,
     ):
         sample_rate = sample_rate or (live_options.sample_rate if live_options else None)
@@ -263,6 +264,7 @@ class DeepgramSTTService(STTService):
         
         self.language = merged_options.language
         self.api_key = api_key
+        self.inbound_call = inbound_call  
 
         self._settings = merged_options.to_dict()
         self._addons = addons
@@ -601,7 +603,8 @@ class DeepgramSTTService(STTService):
 
             await self.stop_ttfb_metrics()
 
-            await self._detect_and_handle_voicemail(transcript)
+            if not self.inbound_call:  
+                await self._detect_and_handle_voicemail(transcript)
 
             logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
             logger.debug(f"Confidence: {confidence}")
