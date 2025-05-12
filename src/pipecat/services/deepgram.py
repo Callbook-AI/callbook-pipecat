@@ -234,7 +234,7 @@ class DeepgramSTTService(STTService):
         on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS,
         live_options: Optional[LiveOptions] = None,
         addons: Optional[Dict] = None,
-        detect_voicemail: bool = False,  
+        detect_voicemail: bool = True,  
         **kwargs,
     ):
         sample_rate = sample_rate or (live_options.sample_rate if live_options else None)
