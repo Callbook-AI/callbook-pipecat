@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, List, Literal, Mapping, Optional
 
 import aiohttp
+import time
 import httpx
 from loguru import logger
 from openai import (
@@ -179,6 +180,7 @@ class BaseOpenAILLMService(LLMService):
     async def _stream_chat_completions(
         self, context: OpenAILLMContext
     ) -> AsyncStream[ChatCompletionChunk]:
+        start_time = time.perf_counter()
         logger.debug(f"{self}: Generating chat [{context.get_messages_for_logging()}]")
 
         messages: List[ChatCompletionMessageParam] = context.get_messages()
@@ -199,6 +201,10 @@ class BaseOpenAILLMService(LLMService):
                 del message["mime_type"]
 
         chunks = await self.get_chat_completions(context, messages)
+        
+        elapsed = time.perf_counter() - start_time
+        elapsed_formatted = round(elapsed, 3)
+        logger.debug(f"Openai completion duration: {elapsed_formatted}")
         logger.debug(f"{self}: Got chat completions")
 
         return chunks
