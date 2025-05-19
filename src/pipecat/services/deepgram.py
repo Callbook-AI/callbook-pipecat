@@ -64,7 +64,7 @@ except ModuleNotFoundError as e:
 DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3
 IGNORE_REPEATED_MSG_AT_START_SECONDS = 4
 VOICEMAIL_DETECTION_SECONDS = 10
-
+FALSE_INTERIM_SECONDS = 1.3
 
 
 class DeepgramTTSService(TTSService):
@@ -275,6 +275,7 @@ class DeepgramSTTService(STTService):
 
         self._first_message = None
         self._first_message_time = None
+        self._last_interim_time = None
 
 
         self._setup_sibling_deepgram()
@@ -293,13 +294,13 @@ class DeepgramSTTService(STTService):
             self._register_event_handler("on_speech_started")
             self._register_event_handler("on_utterance_end")
 
-        self._transcription_accum_task = None
+        self._async_handler_task = None
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
         self._last_time_transcription = time.time()
 
         self.start_time = time.time()
-        
+
 
     @property
     def vad_enabled(self):
@@ -381,8 +382,8 @@ class DeepgramSTTService(STTService):
         )
         self._connection.on(LiveTranscriptionEvents(LiveTranscriptionEvents.Error), self._on_error)
 
-        if not self._transcription_accum_task:
-            self._transcription_accum_task = self.create_monitored_task(self._transcription_accum)
+        if not self._async_handler_task:
+            self._async_handler_task = self.create_monitored_task(self._async_handler)
 
         if self.vad_enabled:
             self._connection.on(
@@ -399,8 +400,8 @@ class DeepgramSTTService(STTService):
 
     async def _disconnect(self):
 
-        if self._transcription_accum_task:
-            await self.cancel_task(self._transcription_accum_task)
+        if self._async_handler_task:
+            await self.cancel_task(self._async_handler_task)
 
         if self._connection.is_connected:
             logger.debug("Disconnecting from Deepgram")
@@ -454,7 +455,30 @@ class DeepgramSTTService(STTService):
     def _transcript_words_count(self, transcript: str):
         return len(transcript.split(" "))
     
-    async def _transcription_accum(self, task_name):
+
+    async def _async_handle_accum_transcription(self, current_time):
+
+        if current_time - self._last_time_accum_transcription > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
+            logger.debug("Sending accum transcription because of timeout")
+            await self._send_accum_transcriptions()
+
+    async def _handle_false_interim(self, current_time):
+
+        if not self._user_speaking: return
+        if not self._last_interim_time: return
+        if self._vad_active: return
+
+        last_interim_delay = current_time - self._last_interim_time
+
+        if last_interim_delay > FALSE_INTERIM_SECONDS: return
+
+        logger.debug("False interim detected")
+
+        await self._handle_user_silence()
+
+
+    
+    async def _async_handler(self, task_name):
 
         while True:
             if not self.is_monitored_task_active(task_name): return
@@ -463,9 +487,12 @@ class DeepgramSTTService(STTService):
             
             current_time = time.time()
 
-            if current_time - self._last_time_accum_transcription > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
-                logger.debug("Sending accum transcription because of timeout")
-                await self._send_accum_transcriptions()
+            await self._async_handle_accum_transcription(current_time)
+            await self._handle_false_interim(current_time)
+
+
+
+            
     
     async def _send_accum_transcriptions(self):
 
@@ -536,6 +563,7 @@ class DeepgramSTTService(STTService):
             logger.debug("Ignoring Deepgram interruption because VAD inactive")
             return
         
+        self._last_interim_time = time.time()
         await self._handle_user_speaking()
         await self.push_frame(
             InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
