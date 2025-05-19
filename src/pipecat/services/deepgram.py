@@ -454,7 +454,6 @@ class DeepgramSTTService(STTService):
 
     def _transcript_words_count(self, transcript: str):
         return len(transcript.split(" "))
-    
 
     async def _async_handle_accum_transcription(self, current_time):
 
@@ -554,14 +553,6 @@ class DeepgramSTTService(STTService):
             await self._send_accum_transcriptions()
     
     async def _on_interim_transcript_message(self, transcript, language, start_time):
-
-        if self._bot_speaking and self._transcript_words_count(transcript) == 1: 
-            logger.debug(f"Ignoring Deepgram interruption because bot is speaking: {transcript}")
-            return
-        
-        if not self._vad_active:
-            logger.debug("Ignoring Deepgram interruption because VAD inactive")
-            return
         
         self._last_interim_time = time.time()
         await self._handle_user_speaking()
@@ -586,6 +577,14 @@ class DeepgramSTTService(STTService):
         
         if self._should_ignore_first_repeated_message(transcript):
             logger.debug("Ignoring repeated first message")
+            return True
+        
+        if not self._vad_active and not is_final:
+            logger.debug("Ignoring Deepgram interruption because VAD inactive")
+            return True
+        
+        if self._bot_speaking and self._transcript_words_count(transcript) == 1: 
+            logger.debug(f"Ignoring Deepgram interruption because bot is speaking: {transcript}")
             return True
 
         return False
@@ -655,7 +654,7 @@ class DeepgramSTTService(STTService):
             await self._handle_bot_speaking()
 
         if isinstance(frame, BotStoppedSpeakingFrame):
-            logger.debug("Received bot started speaking on deepgram")
+            logger.debug("Received bot stopped speaking on deepgram")
             await self._handle_bot_silence()
 
         if isinstance(frame, UserStartedSpeakingFrame) and not self.vad_enabled:

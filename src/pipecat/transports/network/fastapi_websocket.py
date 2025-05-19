@@ -169,7 +169,7 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
             await asyncio.sleep(0.01)
 
             now = time.time()
-            elapsed_since_audio_ms = (now - self._last_audio_frame_time) * 1000  # Convert to ms
+            elapsed_since_audio_ms = int(now - self._last_audio_frame_time) * 1000  # Convert to ms
             audio_bytes_10ms = int(self._params.serializer.sample_rate / 100) * 2
             
             silence = None
