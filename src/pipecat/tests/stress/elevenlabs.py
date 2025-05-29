@@ -2,6 +2,7 @@
 import time
 import asyncio
 import statistics
+import uuid
 import json
 from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -19,8 +20,10 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_services import InterruptibleWordTTSService, TTSService
 from pipecat.transcriptions.language import Language
-from pipecat.utils.asyncio import BaseTaskManager, TaskManager
+from pipecat.utils.asyncio import TaskManager
 from pipecat.clocks.system_clock import SystemClock
+from pathlib import Path
+
 
 
 import websockets
@@ -135,6 +138,11 @@ def build_elevenlabs_voice_settings(
 
 
 
+# ── global helpers ────────────────────────────────────────────────────
+LOG_FILE   = Path("received_messages.jsonl")              # all messages land here
+ERROR_LOCK = asyncio.Lock()                               # protects the counter
+ERRORS     = 0                                            # global error counter
+
 
 class ElevenLabsTTSService(InterruptibleWordTTSService):
     class InputParams(BaseModel):
@@ -222,6 +230,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         self._callback = callback                   # store the callback
         self._send_ts: Optional[float] = None       # when we last sent text
         self._ttfb_reported = False                 # guard so we report only once
+        self._instance_id = uuid.uuid4().hex 
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -364,16 +373,34 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             return self._websocket
         raise Exception("Websocket not connected")
 
+    # replace the old _receive_messages with the one below
     async def _receive_messages(self):
+        global ERRORS
+        """Receive every websocket message, log it, and count errors."""
+        async for raw in self._get_websocket():
 
-        logger.debug("Receiving text")
-        async for message in self._get_websocket():
-            logger.debug("Receiving message in webcket")
-
+            # existing TTFB logic -------------------------------------------------
             if self._send_ts and not self._ttfb_reported:
                 ttfb = time.perf_counter() - self._send_ts
-                self._callback(ttfb)                # hand the value to the user
+                self._callback(ttfb)
                 self._ttfb_reported = True
+
+            # 1️⃣  persist the raw JSON line-by-line
+            LOG_FILE.parent.mkdir(exist_ok=True)
+            with LOG_FILE.open("a", encoding="utf-8") as fh:
+                fh.write(raw)
+                fh.write("\n")
+                
+            try:
+                payload = json.loads(raw)
+                if "audio" not in payload:
+                    async with ERROR_LOCK:
+                        ERRORS += 1
+            except json.JSONDecodeError:
+                async with ERROR_LOCK:
+                    ERRORS += 1
+
+            
             
 
     async def _keepalive_task_handler(self, task_name):
@@ -472,8 +499,9 @@ async def run_benchmark(concurrency: int = 300, text: str = "Hola, ¿cómo está
     # drop failed runs (NaN) if any
     latencies = [v for v in results_ms if v == v]
 
-    print("\n— Latency results (ms) —")
     print("Runs:        ", len(latencies))
+    print("Errors:      ", ERRORS)
+    print("\n— Latency results (ms) —")
     print("Min:         ", f"{min(latencies):.2f}")
     print("Max:         ", f"{max(latencies):.2f}")
     print("Mean:        ", f"{statistics.mean(latencies):.2f}")
