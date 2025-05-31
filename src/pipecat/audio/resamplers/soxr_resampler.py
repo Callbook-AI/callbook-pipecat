@@ -23,3 +23,13 @@ class SOXRAudioResampler(BaseAudioResampler):
         resampled_audio = soxr.resample(audio_data, in_rate, out_rate, quality="VHQ")
         result = resampled_audio.astype(np.int16).tobytes()
         return result
+
+    def resample_sync(self, audio: bytes, in_rate: int, out_rate: int) -> bytes:
+        """
+        Synchronous resample method for use in non‐async callbacks.
+        """
+        if in_rate == out_rate:
+            return audio
+        audio_data = np.frombuffer(audio, dtype=np.int16)
+        resampled = soxr.resample(audio_data, in_rate, out_rate, quality="VHQ")
+        return resampled.astype(np.int16).tobytes()
