@@ -371,6 +371,8 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             }
             if self._voice_settings:
                 msg["voice_settings"] = self._voice_settings
+            logger.debug(msg["voice_settings"])
+            
             await self._websocket.send(json.dumps(msg))
         except Exception as e:
             logger.error(f"{self} initialization error: {e}")
