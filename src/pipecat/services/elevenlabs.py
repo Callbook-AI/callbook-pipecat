@@ -293,10 +293,23 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         await super().cancel(frame)
         await self._disconnect()
 
+    
     async def flush_audio(self):
-        if self._websocket:
-            msg = {"text": " ", "flush": True}
-            await self._websocket.send(json.dumps(msg))
+        ws = getattr(self, "_websocket", None)
+        if ws is None or getattr(ws, "closed", True) or not getattr(ws, "open", False):
+            return
+
+        msg = {"text": " ", "flush": True}
+        try:
+            await ws.send(json.dumps(msg))
+        except websockets.ConnectionClosedOK:
+            logger.debug(f"{self} flush_audio skipped – websocket closed (OK).")
+        except websockets.ConnectionClosedError as e:
+            logger.debug(f"{self} flush_audio skipped – connection closed: {e}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"{self} flush_audio skipped – unexpected error: {e}")
     
     
     async def flush_audio_to_ignore(self):
