@@ -199,16 +199,19 @@ class BaseOutputTransport(FrameProcessor):
             frame.audio, frame.sample_rate, self._sample_rate
         )
 
+    
+
         cls = type(frame)
-        self._audio_buffer.extend(resampled)
+        self._audio_buffer = bytearray(resampled)
+
         while len(self._audio_buffer) >= self._audio_chunk_size:
             chunk = cls(
                 bytes(self._audio_buffer[: self._audio_chunk_size]),
                 sample_rate=self._sample_rate,
                 num_channels=frame.num_channels,
             )
-            await self._sink_queue.put(chunk)
-            self._audio_buffer = self._audio_buffer[self._audio_chunk_size :]
+            self._sink_queue.put_nowait(chunk)
+            self._audio_buffer = self._audio_buffer[self._audio_chunk_size:]
 
     async def _handle_image(self, frame: OutputImageRawFrame | SpriteFrame):
         if not self._params.camera_out_enabled:
