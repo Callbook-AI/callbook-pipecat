@@ -565,7 +565,7 @@ class DeepgramSTTService(STTService):
         is_final = result.is_final
         confidence = result.channel.alternatives[0].confidence
         transcript = result.channel.alternatives[0].transcript
-        time_start = result.channel.alternatives[0].words[0] if result.channel.alternatives[0].words else 0
+        time_start = result.channel.alternatives[0].words[0].start if result.channel.alternatives[0].words else 0
         
         if not is_final and confidence < 0.7:
             logger.debug("Ignoring iterim because low confidence")
