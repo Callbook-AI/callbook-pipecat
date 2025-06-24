@@ -176,52 +176,64 @@ class DeepgramSiDetector:
         """
         Open the Deepgram websocket. Must be called before sending audio.
         """
-        self._conn = self._client.listen.asyncwebsocket.v("1")
-        self._conn.on(
-            LiveTranscriptionEvents.Transcript,
-            self._on_transcript_event
-        )
-        await self._conn.start(options=self._settings)
+        try:
+            self._conn = self._client.listen.asyncwebsocket.v("1")
+            self._conn.on(
+                LiveTranscriptionEvents.Transcript,
+                self._on_transcript_event
+            )
+            await self._conn.start(options=self._settings)
+        except Exception as e:
+            logger.exception(f"{self} exception in DeepgramSiDetector.start: {e}")
 
     async def send_audio(self, chunk: bytes):
         """
         Send a chunk of raw audio (bytes) to Deepgram.
         """
-        if not self._conn or not self._conn.is_connected:
-            raise RuntimeError("Connection not started. Call start() first.")
-        await self._conn.send(chunk)
+        try:
+            if not self._conn or not self._conn.is_connected:
+                raise RuntimeError("Connection not started. Call start() first.")
+            await self._conn.send(chunk)
+        except Exception as e:
+            logger.exception(f"{self} exception in DeepgramSiDetector.send_audio: {e}")
 
     async def stop(self):
         """
         Gracefully close the Deepgram websocket when you’re done sending.
         """
-        if self._conn and self._conn.is_connected:
-            await self._conn.finish()
+        try:
+            if self._conn and self._conn.is_connected:
+                await self._conn.finish()
+        except Exception as e:
+            logger.exception(f"{self} exception in DeepgramSiDetector.stop: {e}")
 
     async def _on_transcript_event(self, *args, **kwargs):
         """
         Internal handler for every transcription event.
         Filters down to final transcripts and applies the "si" regex.
         """
-        result = kwargs.get("result")
-        if not result:
-            return
+        try:
+            result = kwargs.get("result")
+            if not result:
+                return
 
-        alts = result.channel.alternatives
-        if not alts:
-            return
+            alts = result.channel.alternatives
+            if not alts:
+                return
 
-        transcript = alts[0].transcript.strip()
-        if self._pattern.search(transcript):
+            transcript = alts[0].transcript.strip()
+            if self._pattern.search(transcript):
 
-            if result.start in self.start_times: return
-            logger.debug("Si detected")
-            
-            self.start_times.add(result.start)
-            
-            logger.debug("Si detected")
+                if result.start in self.start_times: return
+                logger.debug("Si detected")
+                
+                self.start_times.add(result.start)
+                
+                logger.debug("Si detected")
 
-            await self._callback(result)
+                await self._callback(result)
+        except Exception as e:
+            logger.exception(f"{self} exception in DeepgramSiDetector._on_transcript_event: {e}")
 
 
 class DeepgramSTTService(STTService):
@@ -333,79 +345,109 @@ class DeepgramSTTService(STTService):
         return True
 
     async def set_model(self, model: str):
-        await super().set_model(model)
-        logger.info(f"Switching STT model to: [{model}]")
-        self._settings["model"] = model
-        await self._disconnect()
-        await self._connect()
+        try:
+            await super().set_model(model)
+            logger.info(f"Switching STT model to: [{model}]")
+            self._settings["model"] = model
+            await self._disconnect()
+            await self._connect()
+        except Exception as e:
+            logger.exception(f"{self} exception in set_model: {e}")
+            raise
 
     async def set_language(self, language: Language):
-        logger.info(f"Switching STT language to: [{language}]")
-        self._settings["language"] = language
-        await self._disconnect()
-        await self._connect()
+        try:
+            logger.info(f"Switching STT language to: [{language}]")
+            self._settings["language"] = language
+            await self._disconnect()
+            await self._connect()
+        except Exception as e:
+            logger.exception(f"{self} exception in set_language: {e}")
+            raise
 
     async def start(self, frame: StartFrame):
-        await super().start(frame)
-        self._settings["sample_rate"] = self.sample_rate
-        await self._connect()
+        try:
+            await super().start(frame)
+            self._settings["sample_rate"] = self.sample_rate
+            await self._connect()
 
-        if self._sibling_deepgram:
-            await self._sibling_deepgram.start()
+            if self._sibling_deepgram:
+                await self._sibling_deepgram.start()
+        except Exception as e:
+            logger.exception(f"{self} exception in start: {e}")
+            raise
 
     async def stop(self, frame: EndFrame):
 
-        await super().stop(frame)
-        await self._disconnect()
+        try:
+            await super().stop(frame)
+            await self._disconnect()
 
-        if self._sibling_deepgram:
-            await self._sibling_deepgram.stop()
+            if self._sibling_deepgram:
+                await self._sibling_deepgram.stop()
+        except Exception as e:
+            logger.exception(f"{self} exception in stop: {e}")
+            raise
 
     async def cancel(self, frame: CancelFrame):
 
-        await super().cancel(frame)
-        await self._disconnect()
+        try:
+            await super().cancel(frame)
+            await self._disconnect()
+        except Exception as e:
+            logger.exception(f"{self} exception in cancel: {e}")
+            raise
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
-        await self._connection.send(audio)
-        if self._sibling_deepgram:
-            await self._sibling_deepgram.send_audio(audio)
-        yield None
+        try:
+            await self._connection.send(audio)
+            if self._sibling_deepgram:
+                await self._sibling_deepgram.send_audio(audio)
+            yield None
+        except Exception as e:
+            logger.exception(f"{self} exception in run_stt: {e}")
+            yield ErrorFrame(f"run_stt error: {e}")
 
     async def _connect(self):
-        logger.debug("Connecting to Deepgram")
+        try:
+            logger.debug("Connecting to Deepgram")
 
-        self._connection: AsyncListenWebSocketClient = self._client.listen.asyncwebsocket.v("1")
+            self._connection: AsyncListenWebSocketClient = self._client.listen.asyncwebsocket.v("1")
 
-        self._connection.on(
-            LiveTranscriptionEvents(LiveTranscriptionEvents.Transcript), self._on_message
-        )
-        self._connection.on(LiveTranscriptionEvents(LiveTranscriptionEvents.Error), self._on_error)
-
-        if not self._async_handler_task:
-            self._async_handler_task = self.create_monitored_task(self._async_handler)
-
-        if self.vad_enabled:
             self._connection.on(
-                LiveTranscriptionEvents(LiveTranscriptionEvents.SpeechStarted),
-                self._on_speech_started,
+                LiveTranscriptionEvents(LiveTranscriptionEvents.Transcript), self._on_message
             )
-            self._connection.on(
-                LiveTranscriptionEvents(LiveTranscriptionEvents.UtteranceEnd),
-                self._on_utterance_end,
-            )
+            self._connection.on(LiveTranscriptionEvents(LiveTranscriptionEvents.Error), self._on_error)
 
-        if not await self._connection.start(options=self._settings, addons=self._addons):
-            logger.error(f"{self}: unable to connect to Deepgram")
+            if not self._async_handler_task:
+                self._async_handler_task = self.create_monitored_task(self._async_handler)
+
+            if self.vad_enabled:
+                self._connection.on(
+                    LiveTranscriptionEvents(LiveTranscriptionEvents.SpeechStarted),
+                    self._on_speech_started,
+                )
+                self._connection.on(
+                    LiveTranscriptionEvents(LiveTranscriptionEvents.UtteranceEnd),
+                    self._on_utterance_end,
+                )
+
+            if not await self._connection.start(options=self._settings, addons=self._addons):
+                logger.error(f"{self}: unable to connect to Deepgram")
+        except Exception as e:
+            logger.exception(f"{self} exception in _connect: {e}")
+            raise
 
     async def _disconnect(self):
+        try:
+            if self._async_handler_task:
+                await self.cancel_task(self._async_handler_task)
 
-        if self._async_handler_task:
-            await self.cancel_task(self._async_handler_task)
-
-        if self._connection.is_connected:
-            logger.debug("Disconnecting from Deepgram")
-            await self._connection.finish()
+            if self._connection.is_connected:
+                logger.debug("Disconnecting from Deepgram")
+                await self._connection.finish()
+        except Exception as e:
+            logger.exception(f"{self} exception in _disconnect: {e}")
 
     async def start_metrics(self):
         await self.start_ttfb_metrics()
@@ -610,42 +652,47 @@ class DeepgramSTTService(STTService):
 
 
     async def _on_message(self, *args, **kwargs):
-        result: LiveResultResponse = kwargs["result"]
-
-        logger.debug(result)
-
-        if len(result.channel.alternatives) == 0:
-            return
-        
-        is_final = result.is_final
-        speech_final = result.speech_final
-        transcript = result.channel.alternatives[0].transcript
-        confidence = result.channel.alternatives[0].confidence
-        start_time = result.start
-
-        language = None
-        if result.channel.alternatives[0].languages:
-            language = result.channel.alternatives[0].languages[0]
-            language = Language(language)
-        if len(transcript) > 0:
-
-            await self.stop_ttfb_metrics()
-
-            if self.detect_voicemail:  
-                await self._detect_and_handle_voicemail(transcript)
-
-            logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
-            logger.debug(f"Confidence: {confidence}")
-
-            if await self._should_ignore_transcription(result):
+        try:
+            result: LiveResultResponse = kwargs["result"]
+            
+            logger.debug(result)
+            
+            if len(result.channel.alternatives) == 0:
                 return
-
-            if is_final:
-                await self._on_final_transcript_message(transcript, language, speech_final)
-                self._last_time_transcription = start_time
-            else:
-                await self._on_interim_transcript_message(transcript, language, start_time)
+            
+            is_final = result.is_final
+            speech_final = result.speech_final
+            transcript = result.channel.alternatives[0].transcript
+            confidence = result.channel.alternatives[0].confidence
+            start_time = result.start
+            
+            language = None
+            if result.channel.alternatives[0].languages:
+                language = result.channel.alternatives[0].languages[0]
+                language = Language(language)
+            
+            if len(transcript) > 0:
+                await self.stop_ttfb_metrics()
                 
+                if self.detect_voicemail:
+                    await self._detect_and_handle_voicemail(transcript)
+                
+                logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
+                logger.debug(f"Confidence: {confidence}")
+                
+                if await self._should_ignore_transcription(result):
+                    return
+                
+                if is_final:
+                    await self._on_final_transcript_message(transcript, language, speech_final)
+                    self._last_time_transcription = start_time
+                else:
+                    await self._on_interim_transcript_message(transcript, language, start_time)
+
+        except Exception as e:
+            # full traceback will be logged
+            logger.exception(f"{self} unexpected error in _on_message: {e}")
+
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
