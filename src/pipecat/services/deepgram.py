@@ -310,6 +310,7 @@ class DeepgramSTTService(STTService):
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
         self._last_time_transcription = time.time()
+        self._was_first_transcript_receipt = False
 
         self.start_time = time.time()
 
@@ -591,6 +592,7 @@ class DeepgramSTTService(STTService):
 
         self._handle_first_message(frame.text)
         self._append_accum_transcription(frame)
+        self._was_first_transcript_receipt = True
         if not self._is_accum_transcription(frame.text) or speech_final:
             await self._send_accum_transcriptions()
     
@@ -636,8 +638,8 @@ class DeepgramSTTService(STTService):
 
         logger.debug(transcript)
         logger.debug(self._time_since_init())
-
-        if self._time_since_init() > VOICEMAIL_DETECTION_SECONDS: return
+        
+        if self._time_since_init() > VOICEMAIL_DETECTION_SECONDS and self._was_first_transcript_receipt: return
         
         if not voicemail.is_text_voicemail(transcript): return 
         
