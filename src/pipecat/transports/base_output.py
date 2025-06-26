@@ -79,6 +79,8 @@ class BaseOutputTransport(FrameProcessor):
         self._sink_queue_exit_buffer = bytearray()
         self._mixed_buffer = bytearray()
         self._writing_frame_buffer = bytearray()
+        self._final_audio_buffer = bytearray()
+        
     @property
     def sample_rate(self) -> int:
         return self._sample_rate
@@ -335,21 +337,30 @@ class BaseOutputTransport(FrameProcessor):
             while True:
                 try:
                     frame = self._sink_queue.get_nowait()
+
+                    last_frame_time = time.time()
+
                     if isinstance(frame, OutputAudioRawFrame):
                         self._sink_queue_exit_buffer.extend(frame.audio)
-                        frame.audio = await self._params.audio_out_mixer.mix(frame.audio)
-                        self._mixed_buffer.extend(frame.audio)
-                    
-                    last_frame_time = time.time()
-                    yield frame
+                        mixed_audio = await self._params.audio_out_mixer.mix(frame.audio)
+                        self._mixed_buffer.extend(mixed_audio)
+                        new_frame = OutputAudioRawFrame(
+                            audio=mixed_audio,
+                            sample_rate=frame.sample_rate,
+                            num_channels=frame.num_channels,
+                        )
+                        yield new_frame
+                    else:
+                        yield frame
+
                 except asyncio.QueueEmpty:
-                    # Notify the bot stopped speaking upstream if necessary.
                     diff_time = time.time() - last_frame_time
                     if diff_time > vad_stop_secs:
                         await self._bot_stopped_speaking()
-                    # Generate an audio frame with only the mixer's part.
+
+                    mixed_silence = await self._params.audio_out_mixer.mix(silence)
                     frame = OutputAudioRawFrame(
-                        audio=await self._params.audio_out_mixer.mix(silence),
+                        audio=mixed_silence,
                         sample_rate=self._sample_rate,
                         num_channels=self._params.audio_out_channels,
                     )
