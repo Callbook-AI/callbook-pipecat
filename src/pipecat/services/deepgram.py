@@ -636,12 +636,14 @@ class DeepgramSTTService(STTService):
 
     async def _detect_and_handle_voicemail(self, transcript: str):
 
+        if self.detect_voicemail: return False
+
         logger.debug(transcript)
         logger.debug(self._time_since_init())
         
-        if self._time_since_init() > VOICEMAIL_DETECTION_SECONDS and self._was_first_transcript_receipt: return
+        if self._time_since_init() > VOICEMAIL_DETECTION_SECONDS and self._was_first_transcript_receipt: return False
         
-        if not voicemail.is_text_voicemail(transcript): return 
+        if not voicemail.is_text_voicemail(transcript): return False
         
         logger.debug("Voicemail detected")
 
@@ -650,6 +652,7 @@ class DeepgramSTTService(STTService):
         )
 
         logger.debug("Voicemail pushed")
+        return True
 
 
 
@@ -675,9 +678,10 @@ class DeepgramSTTService(STTService):
             
             if len(transcript) > 0:
                 await self.stop_ttfb_metrics()
-                
-                if self.detect_voicemail:
-                    await self._detect_and_handle_voicemail(transcript)
+
+
+                if await self._detect_and_handle_voicemail(transcript):
+                    return 
                 
                 logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
                 logger.debug(f"Confidence: {confidence}")
