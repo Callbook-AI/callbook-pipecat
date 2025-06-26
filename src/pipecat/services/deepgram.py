@@ -447,6 +447,7 @@ class DeepgramSTTService(STTService):
             if self._connection.is_connected:
                 logger.debug("Disconnecting from Deepgram")
                 await self._connection.finish()
+                logger.debug("Disconnected from Deepgram")
         except Exception as e:
             logger.exception(f"{self} exception in _disconnect: {e}")
 
