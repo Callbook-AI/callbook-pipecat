@@ -446,8 +446,11 @@ class DeepgramSTTService(STTService):
 
             if self._connection.is_connected:
                 logger.debug("Disconnecting from Deepgram")
-                await self._connection.finish()
-                logger.debug("Disconnected from Deepgram")
+                try:
+                    await asyncio.wait_for(self._connection.finish(), timeout=0.1)
+                    logger.debug("Safe disconnect from Deepgram")
+                except asyncio.TimeoutError:
+                    logger.warning("Timeout while disconnecting from Deepgram.")
         except Exception as e:
             logger.exception(f"{self} exception in _disconnect: {e}")
 
