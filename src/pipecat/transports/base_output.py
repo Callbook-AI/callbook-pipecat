@@ -344,7 +344,8 @@ class BaseOutputTransport(FrameProcessor):
                         self._sink_queue_exit_buffer.extend(frame.audio)
                         mixed_audio = await self._params.audio_out_mixer.mix(frame.audio)
                         self._mixed_buffer.extend(mixed_audio)
-                        new_frame = OutputAudioRawFrame(
+                        
+                        new_frame = frame.__class__(
                             audio=mixed_audio,
                             sample_rate=frame.sample_rate,
                             num_channels=frame.num_channels,
