@@ -636,7 +636,7 @@ class DeepgramSTTService(STTService):
 
     async def _detect_and_handle_voicemail(self, transcript: str):
 
-        if self.detect_voicemail: return False
+        if not self.detect_voicemail: return False
 
         logger.debug(transcript)
         logger.debug(self._time_since_init())
