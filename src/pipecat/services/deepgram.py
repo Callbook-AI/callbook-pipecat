@@ -725,5 +725,7 @@ class DeepgramSTTService(STTService):
         
         if isinstance(frame, VADInactiveFrame):
             self._vad_active = False
+            if self._connection and self._connection.is_connected:
+                await self._connection.finalize()  
         elif isinstance(frame, VADActiveFrame):
             self._vad_active = True
