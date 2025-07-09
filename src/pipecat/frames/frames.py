@@ -661,6 +661,12 @@ class STTMuteFrame(SystemFrame):
 
     mute: bool
 
+@dataclass
+class STTRestartFrame(SystemFrame):
+    """System frame to restart the STT service."""
+    pass
+
+
 
 @dataclass
 class TransportMessageUrgentFrame(SystemFrame):

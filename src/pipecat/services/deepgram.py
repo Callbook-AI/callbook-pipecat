@@ -30,7 +30,8 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
     VADActiveFrame,
     VADInactiveFrame,
-    VoicemailFrame
+    VoicemailFrame,
+    STTRestartFrame
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_services import STTService, TTSService
@@ -715,7 +716,13 @@ class DeepgramSTTService(STTService):
 
         if isinstance(frame, BotStoppedSpeakingFrame):
             logger.debug("Received bot stopped speaking on deepgram")
-            await self._handle_bot_silence()
+            await self._handle_bot_silence() 
+
+        if isinstance(frame, STTRestartFrame):
+            logger.debug("Received STT Restart Frame")
+            await self._disconnect()
+            await self._connect()
+            return
 
         if isinstance(frame, UserStartedSpeakingFrame) and not self.vad_enabled:
             # Start metrics if Deepgram VAD is disabled & pipeline VAD has detected speech
