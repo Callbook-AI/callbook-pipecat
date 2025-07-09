@@ -435,6 +435,8 @@ class DeepgramSTTService(STTService):
 
             if not await self._connection.start(options=self._settings, addons=self._addons):
                 logger.error(f"{self}: unable to connect to Deepgram")
+            else:
+                logger.debug(f"Connected to Deepgram")
         except Exception as e:
             logger.exception(f"{self} exception in _connect: {e}")
             raise
