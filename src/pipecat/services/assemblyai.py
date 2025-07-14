@@ -39,6 +39,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_services import AIService
+from pipecat.services.websocket_service import WebsocketService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
 
@@ -250,29 +251,36 @@ class SegmentedSTTService(STTService):
 # AssemblyAI Service
 #
 
-class AssemblyAISTTService(STTService):
+class AssemblyAISTTService(STTService, WebsocketService):
     """AssemblyAI real-time speech-to-text service."""
     def __init__(
         self,
         *,
         api_key: str,
-        language: Language = Language.EN,
+        language: Language = Language.EN,  # AssemblyAI only supports English
         api_endpoint_base_url: str = "wss://streaming.assemblyai.com/v3/ws",
         connection_params: AssemblyAIConnectionParams = AssemblyAIConnectionParams(),
         vad_force_turn_endpoint: bool = True,
         **kwargs,
     ):
-        super().__init__(sample_rate=connection_params.sample_rate, **kwargs)
+        """Initialize the AssemblyAI STT service."""
+        # Explicitly initialize both parent classes
+        STTService.__init__(self, sample_rate=connection_params.sample_rate, **kwargs)
+        WebsocketService.__init__(self)
+
         self._api_key = api_key
         self._language = language
         self._api_endpoint_base_url = api_endpoint_base_url
         self._connection_params = connection_params
         self._vad_force_turn_endpoint = vad_force_turn_endpoint
+
         self._websocket = None
         self._termination_event = asyncio.Event()
         self._received_termination = False
         self._connected = False
+
         self._receive_task = None
+
         self._audio_buffer = bytearray()
         self._chunk_size_ms = 50
         self._chunk_size_bytes = 0
