@@ -371,6 +371,18 @@ class LLMSetToolsFrame(DataFrame):
     tools: List[dict]
 
 
+
+@dataclass
+class LLMSetToolChoiceFrame(DataFrame):
+    """Frame containing tool choice configuration for LLM function calling.
+
+    Parameters:
+        tool_choice: Tool choice setting - 'none', 'auto', 'required', or specific tool dict.
+    """
+
+    tool_choice: Literal["none", "auto", "required"] | dict
+
+
 @dataclass
 class LLMEnablePromptCachingFrame(DataFrame):
     """A frame to enable/disable prompt caching in certain LLMs."""
