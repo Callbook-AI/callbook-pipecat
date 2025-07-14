@@ -4,20 +4,13 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Text processing utilities for sentence boundary detection and tag parsing.
-
-This module provides utilities for natural language text processing including
-sentence boundary detection, email and number pattern handling, and XML-style
-tag parsing for structured text content.
-"""
-
 import re
-from typing import Optional, Sequence, Tuple
+import unicodedata
+
 
 ENDOFSENTENCE_PATTERN_STR = r"""
     (?<![A-Z])       # Negative lookbehind: not preceded by an uppercase letter (e.g., "U.S.A.")
-    (?<!\d\.\d)      # Not preceded by a decimal number (e.g., "3.14159")
-    (?<!^\d\.)       # Not preceded by a numbered list item (e.g., "1. Let's start")
+    (?<!\d)          # Negative lookbehind: not preceded by a digit (e.g., "1. Let's start")
     (?<!\d\s[ap])    # Negative lookbehind: not preceded by time (e.g., "3:00 a.m.")
     (?<!Mr|Ms|Dr)    # Negative lookbehind: not preceded by Mr, Ms, Dr (combined bc. length is the same)
     (?<!Mrs)         # Negative lookbehind: not preceded by "Mrs"
@@ -26,107 +19,22 @@ ENDOFSENTENCE_PATTERN_STR = r"""
     (\。\s*\。\s*\。|[。？！；।])  # the full-width version (mainly used in East Asian languages such as Chinese, Hindi)
     $                # End of string
 """
-
 ENDOFSENTENCE_PATTERN = re.compile(ENDOFSENTENCE_PATTERN_STR, re.VERBOSE)
-
-EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-
-NUMBER_PATTERN = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?")
-
-StartEndTags = Tuple[str, str]
-
-
-def replace_match(text: str, match: re.Match, old: str, new: str) -> str:
-    """Replace occurrences of a substring within a matched section of text.
-
-    Args:
-        text: The input text in which replacements will be made.
-        match: A regex match object representing the section of text to modify.
-        old: The substring to be replaced.
-        new: The substring to replace `old` with.
-
-    Returns:
-        The modified text with the specified replacements made within the matched section.
-    """
-    start = match.start()
-    end = match.end()
-    replacement = text[start:end].replace(old, new)
-    text = text[:start] + replacement + text[end:]
-    return text
 
 
 def match_endofsentence(text: str) -> int:
-    """Find the position of the end of a sentence in the provided text.
-
-    This function processes the input text by replacing periods in email
-    addresses and numbers with ampersands to prevent them from being
-    misidentified as sentence terminals. It then searches for the end of a
-    sentence using a specified regex pattern.
-
-    Args:
-        text: The input text in which to find the end of the sentence.
-
-    Returns:
-        The position of the end of the sentence if found, otherwise 0.
-    """
-    text = text.rstrip()
-
-    # Replace email dots by ampersands so we can find the end of sentence. For
-    # example, first.last@email.com becomes first&last@email&com.
-    emails = list(EMAIL_PATTERN.finditer(text))
-    for email_match in emails:
-        text = replace_match(text, email_match, ".", "&")
-
-    # Replace number dots by ampersands so we can find the end of sentence.
-    numbers = list(NUMBER_PATTERN.finditer(text))
-    for number_match in numbers:
-        text = replace_match(text, number_match, ".", "&")
-
-    # Match against the new text.
-    match = ENDOFSENTENCE_PATTERN.search(text)
-
+    match = ENDOFSENTENCE_PATTERN.search(text.rstrip())
     return match.end() if match else 0
 
 
-def parse_start_end_tags(
-    text: str,
-    tags: Sequence[StartEndTags],
-    current_tag: Optional[StartEndTags],
-    current_tag_index: int,
-) -> Tuple[Optional[StartEndTags], int]:
-    """Parse text to identify start and end tag pairs.
 
-    If a start tag was previously found (i.e., current_tag is valid), wait for
-    the corresponding end tag. Otherwise, wait for a start tag.
+def normalize_text(text):
+    # Remove accents
+    text = unicodedata.normalize('NFD', text)
+    text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+    # Remove punctuation and lowercase
+    text = re.sub(r'[^\w\s]', '', text).lower().strip()
+    return text
 
-    This function returns the index in the text where parsing should continue
-    in the next call and the current or new tags.
-
-    Args:
-        text: The text to be parsed.
-        tags: List of tuples containing start and end tags.
-        current_tag: The currently active tags, if any.
-        current_tag_index: The current index in the text.
-
-    Returns:
-        A tuple containing None or the current tag and the index of the text.
-    """
-    # If we are already inside a tag, check if the end tag is in the text.
-    if current_tag:
-        _, end_tag = current_tag
-        if end_tag in text[current_tag_index:]:
-            return (None, len(text))
-        return (current_tag, current_tag_index)
-
-    # Check if any start tag appears in the text
-    for start_tag, end_tag in tags:
-        start_tag_count = text[current_tag_index:].count(start_tag)
-        end_tag_count = text[current_tag_index:].count(end_tag)
-        if start_tag_count == 0 and end_tag_count == 0:
-            return (None, current_tag_index)
-        elif start_tag_count > end_tag_count:
-            return ((start_tag, end_tag), len(text))
-        elif start_tag_count == end_tag_count:
-            return (None, len(text))
-
-    return (None, current_tag_index)
+def is_equivalent_basic(text1, text2):
+    return normalize_text(text1) == normalize_text(text2)

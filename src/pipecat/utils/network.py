@@ -4,8 +4,6 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Base class for network utilities, providing exponential backoff time calculation."""
-
 
 def exponential_backoff_time(
     attempt: int, min_wait: float = 4, max_wait: float = 10, multiplier: float = 1
