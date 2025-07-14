@@ -656,6 +656,54 @@ class FunctionCallInProgressFrame(SystemFrame):
 
 
 @dataclass
+class FunctionCallCancelFrame(SystemFrame):
+    """Frame signaling that a function call has been cancelled.
+
+    Parameters:
+        function_name: Name of the function that was cancelled.
+        tool_call_id: Unique identifier for the cancelled function call.
+    """
+
+    function_name: str
+    tool_call_id: str
+
+
+@dataclass
+class FunctionCallResultProperties:
+    """Properties for configuring function call result behavior.
+
+    Parameters:
+        run_llm: Whether to run the LLM after receiving this result.
+        on_context_updated: Callback to execute when context is updated.
+    """
+
+    run_llm: Optional[bool] = None
+    on_context_updated: Optional[Callable[[], Awaitable[None]]] = None
+
+
+@dataclass
+class FunctionCallResultFrame(SystemFrame):
+    """Frame containing the result of an LLM function call.
+
+    Parameters:
+        function_name: Name of the function that was executed.
+        tool_call_id: Unique identifier for the function call.
+        arguments: Arguments that were passed to the function.
+        result: The result returned by the function.
+        run_llm: Whether to run the LLM after this result.
+        properties: Additional properties for result handling.
+    """
+
+    function_name: str
+    tool_call_id: str
+    arguments: Any
+    result: Any
+    run_llm: Optional[bool] = None
+    properties: Optional[FunctionCallResultProperties] = None
+
+
+
+@dataclass
 class STTMuteFrame(SystemFrame):
     """System frame to mute/unmute the STT service."""
 
