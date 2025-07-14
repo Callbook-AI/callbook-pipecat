@@ -31,7 +31,7 @@ from typing import (
     get_type_hints,
 )
 
-import docstring_parser
+# import docstring_parser
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 
@@ -132,19 +132,19 @@ class BaseDirectFunctionWrapper:
         self.name = self.function.__name__
 
         # Parse docstring for description and parameters
-        docstring = docstring_parser.parse(inspect.getdoc(self.function))
+        # docstring = docstring_parser.parse(inspect.getdoc(self.function))
 
         # Get function description
-        self.description = (docstring.description or "").strip()
+        # self.description = (docstring.description or "").strip()
 
-        # Get function parameters as JSON schemas, and the list of required parameters
-        self.properties, self.required = self._get_parameters_as_jsonschema(
-            self.function, docstring.params
-        )
+        # # Get function parameters as JSON schemas, and the list of required parameters
+        # self.properties, self.required = self._get_parameters_as_jsonschema(
+        #     self.function, docstring.params
+        # )
 
     # TODO: maybe to better support things like enums, check if each type is a pydantic type and use its convert-to-jsonschema function
     def _get_parameters_as_jsonschema(
-        self, func: Callable, docstring_params: List[docstring_parser.DocstringParam]
+        # self, func: Callable, docstring_params: List[docstring_parser.DocstringParam]
     ) -> Tuple[Dict[str, Any], List[str]]:
         """Get function parameters as a dictionary of JSON schemas and a list of required parameters.
 
@@ -160,38 +160,38 @@ class BaseDirectFunctionWrapper:
             - A dictionary mapping each function parameter to its JSON schema
             - A list of required parameter names
         """
-        sig = inspect.signature(func)
-        hints = get_type_hints(func)
+        # sig = inspect.signature(func)
+        # hints = get_type_hints(func)
         properties = {}
         required = []
 
-        for name, param in sig.parameters.items():
-            # Ignore 'self' parameter
-            if name == "self":
-                continue
+        # # for name, param in sig.parameters.items():
+        #     # Ignore 'self' parameter
+        #     if name == "self":
+        #         continue
 
-            # Ignore the first parameter, which is expected to be the "special" one
-            # (We have already validated that this is the case in validate_function())
-            is_first_param = name == next(iter(sig.parameters))
-            if is_first_param:
-                continue
+        #     # Ignore the first parameter, which is expected to be the "special" one
+        #     # (We have already validated that this is the case in validate_function())
+        #     is_first_param = name == next(iter(sig.parameters))
+        #     if is_first_param:
+        #         continue
 
-            type_hint = hints.get(name)
+        #     type_hint = hints.get(name)
 
-            # Convert type hint to JSON schema
-            properties[name] = self._typehint_to_jsonschema(type_hint)
+        #     # Convert type hint to JSON schema
+        #     properties[name] = self._typehint_to_jsonschema(type_hint)
 
-            # Add whether the parameter is required
-            # If the parameter has no default value, it's required
-            if param.default is inspect.Parameter.empty:
-                required.append(name)
+        #     # Add whether the parameter is required
+        #     # If the parameter has no default value, it's required
+        #     if param.default is inspect.Parameter.empty:
+        #         required.append(name)
 
-            # Add parameter description from docstring
-            for doc_param in docstring_params:
-                if doc_param.arg_name == name:
-                    properties[name]["description"] = doc_param.description or ""
+        #     # Add parameter description from docstring
+        #     for doc_param in docstring_params:
+        #         if doc_param.arg_name == name:
+        #             properties[name]["description"] = doc_param.description or ""
 
-        return properties, required
+        # return properties, required
 
     def _typehint_to_jsonschema(self, type_hint: Any) -> Dict[str, Any]:
         """Convert a Python type hint to a JSON Schema.
