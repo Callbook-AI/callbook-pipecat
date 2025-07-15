@@ -22,7 +22,7 @@ from typing import (
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.clocks.base_clock import BaseClock
 from pipecat.metrics.metrics import MetricsData
-from pipecat.processors.frame_processor import FrameProcessor
+
 from pipecat.transcriptions.language import Language
 from pipecat.utils.asyncio import BaseTaskManager
 from pipecat.utils.time import nanoseconds_to_str
@@ -30,7 +30,7 @@ from pipecat.utils.utils import obj_count, obj_id
 
 if TYPE_CHECKING:
     from pipecat.observers.base_observer import BaseObserver
-
+    from pipecat.processors.frame_processor import FrameProcessor
 
 class KeypadEntry(str, Enum):
     """DTMF entries."""
