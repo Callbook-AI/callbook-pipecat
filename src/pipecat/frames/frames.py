@@ -22,6 +22,7 @@ from typing import (
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.clocks.base_clock import BaseClock
 from pipecat.metrics.metrics import MetricsData
+from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.transcriptions.language import Language
 from pipecat.utils.asyncio import BaseTaskManager
 from pipecat.utils.time import nanoseconds_to_str
@@ -867,3 +868,34 @@ class MixerEnableFrame(MixerControlFrame):
     """Control frame to enable or disable the mixer at runtime."""
 
     enable: bool
+
+
+@dataclass
+class FrameProcessorPauseFrame(ControlFrame):
+    """Frame to pause frame processing for a specific processor.
+
+    This frame is used to pause frame processing for the given
+    processor. Pausing frame processing will keep frames in the internal queue
+    which will then be processed when frame processing is resumed with
+    `FrameProcessorResumeFrame`.
+
+    Parameters:
+        processor: The frame processor to pause.
+    """
+
+    processor: "FrameProcessor"
+
+
+@dataclass
+class FrameProcessorResumeFrame(ControlFrame):
+    """Frame to resume frame processing for a specific processor.
+
+    This frame is used to resume frame processing for the given processor if
+    it was previously paused. After resuming frame processing all queued frames
+    will be processed in the order received.
+
+    Parameters:
+        processor: The frame processor to resume.
+    """
+
+    processor: "FrameProcessor"
