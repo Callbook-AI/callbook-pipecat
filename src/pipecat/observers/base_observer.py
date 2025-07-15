@@ -5,10 +5,22 @@
 #
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from pipecat.frames.frames import Frame
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.frames.frames import Frame, FrameDirection
 
+if TYPE_CHECKING:
+    from pipecat.processors.frame_processor import FrameProcessor
+
+
+@dataclass
+class FramePushed:
+    source: "FrameProcessor"
+    destination: "FrameProcessor"
+    frame: Frame
+    direction: FrameDirection
+    timestamp: float
 
 class BaseObserver(ABC):
     """This is the base class for pipeline frame observers. Observers can view
