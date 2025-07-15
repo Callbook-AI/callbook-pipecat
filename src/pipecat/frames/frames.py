@@ -738,6 +738,38 @@ class VisionImageRawFrame(InputImageRawFrame):
 
 
 @dataclass
+class FrameProcessorPauseUrgentFrame(SystemFrame):
+    """Frame to pause frame processing immediately.
+
+    This frame is used to pause frame processing for the given processor as
+    fast as possible. Pausing frame processing will keep frames in the internal
+    queue which will then be processed when frame processing is resumed with
+    `FrameProcessorResumeFrame`.
+
+    Parameters:
+        processor: The frame processor to pause.
+    """
+
+    processor: "FrameProcessor"
+
+
+
+@dataclass
+class FrameProcessorResumeUrgentFrame(SystemFrame):
+    """Frame to resume frame processing immediately.
+
+    This frame is used to resume frame processing for the given processor
+    if it was previously paused as fast as possible. After resuming frame
+    processing all queued frames will be processed in the order received.
+
+    Parameters:
+        processor: The frame processor to resume.
+    """
+
+    processor: "FrameProcessor"
+
+
+@dataclass
 class EndFrame(ControlFrame):
     """Indicates that a pipeline has ended and frame processors and pipelines
     should be shut down. If the transport receives this frame, it will stop
