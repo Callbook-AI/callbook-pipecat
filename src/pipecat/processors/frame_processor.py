@@ -18,6 +18,7 @@ from pipecat.frames.frames import (
     CancelFrame,
     ErrorFrame,
     Frame,
+    FrameDirection,
     FrameProcessorPauseFrame,
     FrameProcessorPauseUrgentFrame,
     FrameProcessorResumeFrame,
@@ -35,10 +36,6 @@ from pipecat.utils.asyncio.watchdog_event import WatchdogEvent
 from pipecat.utils.asyncio.watchdog_queue import WatchdogQueue
 from pipecat.utils.base_object import BaseObject
 
-
-class FrameDirection(Enum):
-    DOWNSTREAM = 1
-    UPSTREAM = 2
 
 
 @dataclass

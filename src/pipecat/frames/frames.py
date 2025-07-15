@@ -53,6 +53,17 @@ def format_pts(pts: Optional[int]):
     return nanoseconds_to_str(pts) if pts else None
 
 
+class FrameDirection(Enum):
+    """Direction of frame flow in the processing pipeline.
+
+    Parameters:
+        DOWNSTREAM: Frames flowing from input to output.
+        UPSTREAM: Frames flowing back from output to input.
+    """
+
+    DOWNSTREAM = 1
+    UPSTREAM = 2
+
 @dataclass
 class Frame:
     """Base frame class."""
