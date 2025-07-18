@@ -289,6 +289,7 @@ class DeepgramSTTService(STTService):
         self._first_message = None
         self._first_message_time = None
         self._last_interim_time = None
+        self._restarted = False
 
 
         self._setup_sibling_deepgram()
@@ -664,6 +665,7 @@ class DeepgramSTTService(STTService):
 
 
     async def _on_message(self, *args, **kwargs):
+        if not self._restarted: return
         try:
             result: LiveResultResponse = kwargs["result"]
             
@@ -720,6 +722,7 @@ class DeepgramSTTService(STTService):
 
         if isinstance(frame, STTRestartFrame):
             logger.debug("Received STT Restart Frame")
+            self._restarted = True
             await self._disconnect()
             await self._connect()
             return
