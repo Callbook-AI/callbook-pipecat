@@ -253,6 +253,8 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         # there's an interruption or TTSStoppedFrame.
         self._started = False
         self._cumulative_time = 0
+        self._last_alignment_text = ""
+        self._processed_message_ids = set()
 
         self._receive_task = None
         self._keepalive_task = None
@@ -299,9 +301,10 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         if ws is None or getattr(ws, "closed", True) or not getattr(ws, "open", False):
             return
 
-        msg = {"text": " ", "flush": True}
+        msg = {"text": "", "flush": True}
         try:
             await ws.send(json.dumps(msg))
+            logger.debug(f"{self} flush_audio sent")
         except websockets.ConnectionClosedOK:
             logger.debug(f"{self} flush_audio skipped – websocket closed (OK).")
         except websockets.ConnectionClosedError as e:
@@ -313,11 +316,15 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
     
     
     async def flush_audio_to_ignore(self):
-
         if self._started:
             logger.debug("Flushing to ignore")
             self._started = False
             await self.flush_audio()
+            # Reset cumulative time to prevent issues with word timestamps
+            self._cumulative_time = 0
+            # Clear processed message tracking
+            self._processed_message_ids.clear()
+            self._last_alignment_text = ""
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
@@ -402,6 +409,10 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 self._websocket = None
 
             self._started = False
+            # Clear tracking on disconnect
+            self._processed_message_ids.clear()
+            self._last_alignment_text = ""
+            self._cumulative_time = 0
         except Exception as e:
             logger.error(f"{self} error closing websocket: {e}")
 
@@ -410,7 +421,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             return self._websocket
         raise Exception("Websocket not connected")
 
-    async def _receive_messages(self):
+    async def _receive_messages(self):        
         async for message in self._get_websocket():
             
             if not self._started: 
@@ -418,18 +429,38 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 continue
 
             msg = json.loads(message)
-            if msg.get("audio"):
+            
+            # Create a simple message ID based on content for deduplication
+            msg_id = None
+            if msg.get("alignment"):
+                alignment_text = ''.join(msg['alignment'].get('chars', []))
+                msg_id = f"alignment_{hash(alignment_text)}"
+                
+                # Skip duplicate alignment messages
+                if msg_id in self._processed_message_ids:
+                    logger.debug(f"Skipping duplicate alignment message: {alignment_text}")
+                    continue
+                    
+                # Also check against last alignment text as fallback
+                if alignment_text == self._last_alignment_text:
+                    logger.debug(f"Skipping duplicate alignment message (text match): {alignment_text}")
+                    continue
+                    
+                self._processed_message_ids.add(msg_id)
+                self._last_alignment_text = alignment_text
+                
+                logger.debug(f"Received message from Elevenlabs: {alignment_text}")
+                word_times = calculate_word_times(msg["alignment"], self._cumulative_time)
+                await self.add_word_timestamps(word_times)
+                self._cumulative_time = word_times[-1][1]
+                
+            elif msg.get("audio"):
                 await self.stop_ttfb_metrics()
                 self.start_word_timestamps()
 
                 audio = base64.b64decode(msg["audio"])
                 frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
                 await self.push_frame(frame)
-            if msg.get("alignment"):
-                logger.debug(f"Received message from Elevenlabs: {''.join(msg['alignment'].get('chars'))}")
-                word_times = calculate_word_times(msg["alignment"], self._cumulative_time)
-                await self.add_word_timestamps(word_times)
-                self._cumulative_time = word_times[-1][1]
 
     async def _keepalive_task_handler(self, task_name):
         while True:
@@ -461,6 +492,9 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                     yield TTSStartedFrame()
                     self._started = True
                     self._cumulative_time = 0
+                    # Clear tracking for new TTS session
+                    self._processed_message_ids.clear()
+                    self._last_alignment_text = ""
 
                 await self._send_text(text)
                 await self.start_tts_usage_metrics(text)
@@ -473,6 +507,16 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             yield None
         except Exception as e:
             logger.error(f"{self} exception: {e}")
+
+    def get_debug_state(self):
+        """Get current debug state for troubleshooting"""
+        return {
+            "started": self._started,
+            "cumulative_time": self._cumulative_time,
+            "processed_messages_count": len(self._processed_message_ids),
+            "last_alignment_text": self._last_alignment_text[:50] + "..." if len(self._last_alignment_text) > 50 else self._last_alignment_text,
+            "websocket_connected": hasattr(self, '_websocket') and self._websocket is not None
+        }
 
 
 class ElevenLabsHttpTTSService(TTSService):
