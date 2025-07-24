@@ -222,7 +222,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         # speaking for a while, so we want the parent class to send TTSStopFrame
         # after a short period not receiving any audio.
         super().__init__(
-            aggregate_sentences=False,
+            aggregate_sentences=True,
             push_text_frames=False,
             push_stop_frames=True,
             pause_frame_processing=True,
