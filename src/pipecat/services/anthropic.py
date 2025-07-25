@@ -315,7 +315,8 @@ class AnthropicLLMService(LLMService):
             elapsed_formatted = round(elapsed, 3)
             self._completion_durations.append(elapsed_formatted)  # Store the duration
             logger.debug(f"Anthropic completion duration: {elapsed_formatted}")
-            
+            logger.debug(f"Anthropic model: {self.model_name}, {self._completion_durations}")
+
             comp_tokens = (
                 completion_tokens
                 if not use_completion_tokens_estimate
