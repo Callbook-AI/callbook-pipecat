@@ -10,6 +10,7 @@ import copy
 import io
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Union
 
@@ -119,6 +120,21 @@ class AnthropicLLMService(LLMService):
             "top_p": params.top_p,
             "extra": params.extra if isinstance(params.extra, dict) else {},
         }
+        self._completion_durations = []  # List to store elapsed completion times
+
+    def get_completion_durations(self) -> List[float]:
+        """Get the list of completion durations."""
+        return self._completion_durations.copy()
+    
+    def get_average_completion_duration(self) -> float:
+        """Get the average completion duration."""
+        if not self._completion_durations:
+            return 0.0
+        return sum(self._completion_durations) / len(self._completion_durations)
+
+    def clear_completion_durations(self):
+        """Clear the list of completion durations."""
+        self._completion_durations.clear()
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -172,6 +188,8 @@ class AnthropicLLMService(LLMService):
         use_completion_tokens_estimate = False
         cache_creation_input_tokens = 0
         cache_read_input_tokens = 0
+
+        start_time = time.perf_counter()  # Start timing the completion
 
         try:
             await self.push_frame(LLMFullResponseStartFrame())
@@ -291,6 +309,13 @@ class AnthropicLLMService(LLMService):
         finally:
             await self.stop_processing_metrics()
             await self.push_frame(LLMFullResponseEndFrame())
+            
+            # Calculate and store completion duration
+            elapsed = time.perf_counter() - start_time
+            elapsed_formatted = round(elapsed, 3)
+            self._completion_durations.append(elapsed_formatted)  # Store the duration
+            logger.debug(f"Anthropic completion duration: {elapsed_formatted}")
+            
             comp_tokens = (
                 completion_tokens
                 if not use_completion_tokens_estimate
