@@ -965,7 +965,7 @@ class GoogleLLMService(LLMService):
         self,
         *,
         api_key: str,
-        model: str = "gemini-2.0-flash-001",
+        model: str = "gemini-2.0-flash",
         params: InputParams = InputParams(),
         system_instruction: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
