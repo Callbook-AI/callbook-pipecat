@@ -248,6 +248,7 @@ class DeepgramSTTService(STTService):
         live_options: Optional[LiveOptions] = None,
         addons: Optional[Dict] = None,
         detect_voicemail: bool = True,  
+        allow_interruptions: bool = True,
         **kwargs,
     ):
         sample_rate = sample_rate or (live_options.sample_rate if live_options else None)
@@ -278,6 +279,8 @@ class DeepgramSTTService(STTService):
         self.language = merged_options.language
         self.api_key = api_key
         self.detect_voicemail = detect_voicemail  
+        self._allow_stt_interruptions = allow_interruptions
+        logger.debug(f"Allow ** interruptions: {self._allow_stt_interruptions}")
 
         self._settings = merged_options.to_dict()
         self._addons = addons
@@ -633,6 +636,11 @@ class DeepgramSTTService(STTService):
         
         if not self._vad_active and not is_final:
             logger.debug("Ignoring Deepgram interruption because VAD inactive")
+            return True
+        
+        logger.debug("Bot speaking: " + str(self._bot_speaking ) + " ** allow_interruptions: " + str(self._allow_stt_interruptions))
+        if self._bot_speaking and not self._allow_stt_interruptions:
+            logger.debug("Ignoring Deepgram interruption because allow_interruptions is False")
             return True
         
         if self._bot_speaking and self._transcript_words_count(transcript) == 1: 
