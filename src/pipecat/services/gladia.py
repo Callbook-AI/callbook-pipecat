@@ -50,10 +50,10 @@ except ModuleNotFoundError as e:
 
 
 # Constants matching Deepgram service
-DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3
-IGNORE_REPEATED_MSG_AT_START_SECONDS = 4
-VOICEMAIL_DETECTION_SECONDS = 10
-FALSE_INTERIM_SECONDS = 1.3
+DEFAULT_ON_NO_PUNCTUATION_SECONDS = 1.5  # Reduced from 3
+IGNORE_REPEATED_MSG_AT_START_SECONDS = 3  # Reduced from 4
+VOICEMAIL_DETECTION_SECONDS = 8          # Reduced from 10
+FALSE_INTERIM_SECONDS = 1.0              # Reduced from 1.3
 
 
 def language_to_gladia_language(language: Language) -> Optional[str]:
@@ -195,13 +195,13 @@ class GladiaSTTService(STTService):
         if params.model == "solaria-1":
             # Optimize for call scenarios - balance accuracy and noise reduction
             if params.speech_threshold is None:
-                params.speech_threshold = 0.65  # Balanced threshold for call audio
+                params.speech_threshold = 0.80  # Higher threshold for faster detection
             if params.audio_enhancer is None:
                 params.audio_enhancer = False   # Disable to reduce processing latency
             if params.words_accurate_timestamps is None:
                 params.words_accurate_timestamps = False  # Disable for faster response
             if params.endpointing is None:
-                params.endpointing = 0.15  # Faster endpointing
+                params.endpointing = 0.08  # Even faster endpointing (was 0.15)
             if params.maximum_duration_without_endpointing is None:
                 params.maximum_duration_without_endpointing = 8  # Shorter duration
         
@@ -391,7 +391,10 @@ class GladiaSTTService(STTService):
     
     # Frame processing methods matching Deepgram
     async def _handle_user_speaking(self):
-        await self.push_frame(StartInterruptionFrame())
+        # Only push interruption frame if bot is actually speaking
+        if self._bot_speaking:
+            await self.push_frame(StartInterruptionFrame())
+        
         if self._user_speaking:
             return
 
@@ -435,7 +438,7 @@ class GladiaSTTService(STTService):
     
     async def _async_handler(self):
         while True:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)  # Reduced from 0.1 for faster processing
             
             current_time = time.time()
             await self._async_handle_accum_transcription(current_time)
@@ -445,13 +448,12 @@ class GladiaSTTService(STTService):
         if not len(self._accum_transcription_frames):
             return
 
-        await self._handle_user_speaking()
-
+        # Send transcriptions immediately without extra user speaking frames
+        # to reduce frame processing overhead
         for frame in self._accum_transcription_frames:
             await self.push_frame(frame)
         self._accum_transcription_frames = []
 
-        await self._handle_user_silence()
         await self.stop_processing_metrics()
 
     def _is_accum_transcription(self, text: str):
@@ -480,33 +482,25 @@ class GladiaSTTService(STTService):
         if time_since_first_message > IGNORE_REPEATED_MSG_AT_START_SECONDS:
             return False
         
-        return is_equivalent_basic(text, self._first_message)
-    
+        return is_equivalent_basic(text, self._first_message)    
     async def _should_ignore_transcription(self, transcript: str, is_final: bool, confidence: float):
-        if not is_final and confidence < 0.7:
-            logger.debug("Ignoring interim because low confidence")
+        # Fast path: check confidence first (most common rejection)
+        if not is_final and confidence < 0.6:
             return True
 
-        if self._transcript_words_count(transcript) == 1 and confidence < 0.8:
-            logger.debug("Ignoring single word with low confidence")
+        if self._transcript_words_count(transcript) == 1 and confidence < 0.7:
             return True
         
-    
-        if self._should_ignore_first_repeated_message(transcript):
-            logger.debug("Ignoring repeated first message")
-            return True
-        
-        if not self._vad_active and not is_final:
-            logger.debug("Ignoring Gladia interruption because VAD inactive")
-            return True
-        
-        logger.debug("Bot speaking: " + str(self._bot_speaking) + " allow_interruptions: " + str(self._allow_stt_interruptions))
+        # Early exit for bot speaking scenarios
         if self._bot_speaking and not self._allow_stt_interruptions:
-            logger.debug("Ignoring Gladia interruption because allow_interruptions is False")
             return True
         
-        if self._bot_speaking and self._transcript_words_count(transcript) == 1: 
-            logger.debug(f"Ignoring Gladia interruption because bot is speaking: {transcript}")
+        # Check VAD state only if needed
+        if not self._vad_active and not is_final:
+            return True
+        
+        # Less frequent checks last
+        if self._should_ignore_first_repeated_message(transcript):
             return True
 
         return False
@@ -530,7 +524,7 @@ class GladiaSTTService(STTService):
         return True
     
     async def _on_final_transcript_message(self, transcript, language):
-        await self._handle_user_speaking()
+        # Skip user speaking frame handling for final transcripts to reduce overhead
         frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
 
         self._handle_first_message(frame.text)
@@ -541,7 +535,9 @@ class GladiaSTTService(STTService):
     
     async def _on_interim_transcript_message(self, transcript, language):
         self._last_interim_time = time.time()
-        await self._handle_user_speaking()
+        # Only handle user speaking for interim if not already handled
+        if not self._user_speaking:
+            await self._handle_user_speaking()
         await self.push_frame(
             InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
         )
@@ -553,44 +549,46 @@ class GladiaSTTService(STTService):
         async for message in self._websocket:
             try:
                 content = json.loads(message)
-                if content["type"] == "transcript":
-                    utterance = content["data"]["utterance"]
-                    confidence = utterance.get("confidence", 0)
-                    transcript = utterance["text"]
-                    is_final = content["data"]["is_final"]
+                if content["type"] != "transcript":
+                    continue
                     
-                    # Stop TTFB metrics when we get first transcript
-                    if len(transcript) > 0:
-                        await self.stop_ttfb_metrics()
+                utterance = content["data"]["utterance"]
+                confidence = utterance.get("confidence", 0)
+                
+                # Fast confidence check before processing transcript
+                if confidence < self._confidence:
+                    continue
                     
-                    # Calculate and store response duration for final transcripts
-                    if is_final and self._current_request_start_time is not None:
-                        elapsed = time.perf_counter() - self._current_request_start_time
-                        elapsed_formatted = round(elapsed, 3)
-                        self._stt_response_times.append(elapsed_formatted)
-                        logger.debug(f"Gladia STT response duration: {elapsed_formatted}s")
-                        self._current_request_start_time = None  # Reset for next request
-                    
-                    if confidence >= self._confidence:
-                        # Detect and handle voicemail
-                        if await self._detect_and_handle_voicemail(transcript):
-                            return
-                        
-                        logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
-                        logger.debug(f"Confidence: {confidence}")
-                        
-                        # Check if we should ignore this transcription
-                        if await self._should_ignore_transcription(transcript, is_final, confidence):
-                            return
-                        
-                        # Extract language if available
-                        language = self.language
-                        
-                        if is_final:
-                            await self._on_final_transcript_message(transcript, language)
-                            self._last_time_transcription = time.time()
-                        else:
-                            await self._on_interim_transcript_message(transcript, language)
+                transcript = utterance["text"]
+                is_final = content["data"]["is_final"]
+                
+                # Stop TTFB metrics when we get first transcript
+                if len(transcript) > 0:
+                    await self.stop_ttfb_metrics()
+                
+                # Calculate and store response duration for final transcripts
+                if is_final and self._current_request_start_time is not None:
+                    elapsed = time.perf_counter() - self._current_request_start_time
+                    elapsed_formatted = round(elapsed, 3)
+                    self._stt_response_times.append(elapsed_formatted)
+                    self._current_request_start_time = None  # Reset for next request
+                
+                # Detect and handle voicemail
+                if await self._detect_and_handle_voicemail(transcript):
+                    return
+                
+                # Check if we should ignore this transcription
+                if await self._should_ignore_transcription(transcript, is_final, confidence):
+                    continue
+                
+                # Extract language if available
+                language = self.language
+                
+                if is_final:
+                    await self._on_final_transcript_message(transcript, language)
+                    self._last_time_transcription = time.time()
+                else:
+                    await self._on_interim_transcript_message(transcript, language)
                             
             except Exception as e:
                 logger.exception(f"{self} unexpected error in _receive_task_handler: {e}")

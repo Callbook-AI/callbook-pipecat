@@ -986,6 +986,21 @@ class GoogleLLMService(LLMService):
         }
         self._tools = tools
         self._tool_config = tool_config
+        self._completion_durations = []  # List to store elapsed completion times
+
+    def get_completion_durations(self) -> List[float]:
+        """Returns a list of completion durations in seconds."""
+        return self._completion_durations.copy()
+
+    def get_average_completion_duration(self) -> float:
+        """Returns the average completion duration in seconds."""
+        if not self._completion_durations:
+            return 0.0
+        return sum(self._completion_durations) / len(self._completion_durations)
+
+    def clear_completion_durations(self):
+        """Clears the list of completion durations."""
+        self._completion_durations.clear()
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -1004,6 +1019,9 @@ class GoogleLLMService(LLMService):
 
         grounding_metadata = None
         search_result = ""
+
+        # Start timing for completion duration
+        start_time = time.time()
 
         try:
             logger.debug(
@@ -1145,6 +1163,12 @@ class GoogleLLMService(LLMService):
         except Exception as e:
             logger.exception(f"{self} exception: {e}")
         finally:
+            # Store completion duration
+            end_time = time.time()
+            completion_duration = end_time - start_time
+            logger.debug(f"Completion duration: {completion_duration:.2f} seconds")
+            self._completion_durations.append(completion_duration)
+
             if grounding_metadata is not None and isinstance(grounding_metadata, dict):
                 llm_search_frame = LLMSearchResponseFrame(
                     search_result=search_result,
