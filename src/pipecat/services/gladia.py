@@ -6,7 +6,8 @@
 
 import base64
 import json
-from typing import AsyncGenerator, Optional
+import time
+from typing import AsyncGenerator, List, Optional
 
 import aiohttp
 from loguru import logger
@@ -175,6 +176,10 @@ class GladiaSTTService(STTService):
         self._confidence = confidence
         self._websocket = None
         self._receive_task = None
+        
+        # Response time tracking
+        self._stt_response_times = []  # List to store STT response durations
+        self._current_request_start_time = None  # Track current request start time
 
     def language_to_service_language(self, language: Language) -> Optional[str]:
         return language_to_gladia_language(language)
@@ -207,6 +212,9 @@ class GladiaSTTService(STTService):
             self._receive_task = None
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+        # Start timing for this audio chunk
+        self._current_request_start_time = time.perf_counter()
+        
         await self.start_processing_metrics()
         await self._send_audio(audio)
         await self.stop_processing_metrics()
@@ -242,8 +250,18 @@ class GladiaSTTService(STTService):
                 utterance = content["data"]["utterance"]
                 confidence = utterance.get("confidence", 0)
                 transcript = utterance["text"]
+                is_final = content["data"]["is_final"]
+                
+                # Calculate and store response duration for final transcripts
+                if is_final and self._current_request_start_time is not None:
+                    elapsed = time.perf_counter() - self._current_request_start_time
+                    elapsed_formatted = round(elapsed, 3)
+                    self._stt_response_times.append(elapsed_formatted)
+                    logger.debug(f"Gladia STT response duration: {elapsed_formatted}s")
+                    self._current_request_start_time = None  # Reset for next request
+                
                 if confidence >= self._confidence:
-                    if content["data"]["is_final"]:
+                    if is_final:
                         await self.push_frame(
                             TranscriptionFrame(transcript, "", time_now_iso8601())
                         )
@@ -251,4 +269,18 @@ class GladiaSTTService(STTService):
                         await self.push_frame(
                             InterimTranscriptionFrame(transcript, "", time_now_iso8601())
                         )
+
+    def get_stt_response_times(self) -> List[float]:
+        """Get the list of STT response durations."""
+        return self._stt_response_times.copy()
+    
+    def get_average_stt_response_time(self) -> float:
+        """Get the average STT response duration."""
+        if not self._stt_response_times:
+            return 0.0
+        return sum(self._stt_response_times) / len(self._stt_response_times)
+
+    def clear_stt_response_times(self):
+        """Clear the list of STT response durations."""
+        self._stt_response_times.clear()
 

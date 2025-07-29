@@ -7,7 +7,7 @@
 import re
 import time
 import asyncio
-from typing import AsyncGenerator, Dict, Optional, Callable
+from typing import AsyncGenerator, Dict, List, Optional, Callable
 
 
 from loguru import logger
@@ -318,6 +318,10 @@ class DeepgramSTTService(STTService):
         self._was_first_transcript_receipt = False
 
         self.start_time = time.time()
+        
+        # Response time tracking
+        self._stt_response_times = []  # List to store STT response durations
+        self._current_request_start_time = None  # Track current request start time
 
 
     @property
@@ -349,6 +353,20 @@ class DeepgramSTTService(STTService):
 
     def can_generate_metrics(self) -> bool:
         return True
+
+    def get_stt_response_times(self) -> List[float]:
+        """Get the list of STT response durations."""
+        return self._stt_response_times.copy()
+    
+    def get_average_stt_response_time(self) -> float:
+        """Get the average STT response duration."""
+        if not self._stt_response_times:
+            return 0.0
+        return sum(self._stt_response_times) / len(self._stt_response_times)
+
+    def clear_stt_response_times(self):
+        """Clear the list of STT response durations."""
+        self._stt_response_times.clear()
 
     async def set_model(self, model: str):
         try:
@@ -464,6 +482,8 @@ class DeepgramSTTService(STTService):
     async def start_metrics(self):
         await self.start_ttfb_metrics()
         await self.start_processing_metrics()
+        # Start timing for STT response
+        self._current_request_start_time = time.perf_counter()
 
     async def _on_error(self, *args, **kwargs):
         error: ErrorResponse = kwargs["error"]
@@ -707,6 +727,14 @@ class DeepgramSTTService(STTService):
                     return
                 
                 if is_final:
+                    # Calculate and store response duration for final transcripts
+                    if self._current_request_start_time is not None:
+                        elapsed = time.perf_counter() - self._current_request_start_time
+                        elapsed_formatted = round(elapsed, 3)
+                        self._stt_response_times.append(elapsed_formatted)
+                        logger.debug(f"Deepgram STT response duration: {elapsed_formatted}s")
+                        self._current_request_start_time = None  # Reset for next request
+                    
                     await self._on_final_transcript_message(transcript, language, speech_final)
                     self._last_time_transcription = start_time
                 else:
