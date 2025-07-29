@@ -191,11 +191,19 @@ class GladiaSTTService(STTService):
         logger.debug(f"Detect voicemail: {self.detect_voicemail}")
         logger.debug(f"Model: {self._model}")
         
-        # Map model to appropriate settings for performance
-        if params.model == "nova-2-general":
-            params.speech_threshold = 0.95
-            params.audio_enhancer = True
-            params.words_accurate_timestamps = True
+        # Map model to appropriate settings for performance and call scenarios
+        if params.model == "solaria-1":
+            # Optimize for call scenarios - balance accuracy and noise reduction
+            if params.speech_threshold is None:
+                params.speech_threshold = 0.65  # Balanced threshold for call audio
+            if params.audio_enhancer is None:
+                params.audio_enhancer = False   # Disable to reduce processing latency
+            if params.words_accurate_timestamps is None:
+                params.words_accurate_timestamps = False  # Disable for faster response
+            if params.endpointing is None:
+                params.endpointing = 0.15  # Faster endpointing
+            if params.maximum_duration_without_endpointing is None:
+                params.maximum_duration_without_endpointing = 8  # Shorter duration
         
         self._settings = {
             "encoding": "wav/pcm",
@@ -479,10 +487,11 @@ class GladiaSTTService(STTService):
             logger.debug("Ignoring interim because low confidence")
             return True
 
-        if self._transcript_words_count(transcript) == 1:
-            logger.debug("Ignoring first message, fast greeting")
+        if self._transcript_words_count(transcript) == 1 and confidence < 0.8:
+            logger.debug("Ignoring single word with low confidence")
             return True
         
+    
         if self._should_ignore_first_repeated_message(transcript):
             logger.debug("Ignoring repeated first message")
             return True
