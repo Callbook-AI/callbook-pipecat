@@ -1,8 +1,3 @@
-#
-# Copyright (c) 2024–2025, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
 
 import asyncio
 import base64
@@ -49,11 +44,10 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-# Constants matching Deepgram service
-DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3  # Match Deepgram exactly
-IGNORE_REPEATED_MSG_AT_START_SECONDS = 4  # Match Deepgram exactly  
-VOICEMAIL_DETECTION_SECONDS = 10          # Match Deepgram exactly
-FALSE_INTERIM_SECONDS = 1.3              # Match Deepgram exactly
+DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3 
+IGNORE_REPEATED_MSG_AT_START_SECONDS = 4 
+VOICEMAIL_DETECTION_SECONDS = 10        
+FALSE_INTERIM_SECONDS = 1.3            
 
 
 def language_to_gladia_language(language: Language) -> Optional[str]:
@@ -140,12 +134,9 @@ def language_to_gladia_language(language: Language) -> Optional[str]:
 
     result = BASE_LANGUAGES.get(language)
 
-    # If not found in base languages, try to find the base language from a variant
     if not result:
-        # Convert enum value to string and get the base language part (e.g. es-ES -> es)
         lang_str = str(language.value)
         base_code = lang_str.split("-")[0].lower()
-        # Look up the base code in our supported languages
         result = base_code if base_code in BASE_LANGUAGES.values() else None
 
     return result
@@ -170,10 +161,10 @@ class GladiaSTTService(STTService):
         *,
         api_key: str,
         url: str = "https://api.gladia.io/v2/live",
-        confidence: float = 0.5,
+        confidence: float = 0.3,  # Lowered for faster response
         sample_rate: Optional[int] = None,
         params: InputParams = InputParams(),
-        on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS,
+        on_no_punctuation_seconds: float = 0.6,  # Reduced for faster aggregation
         detect_voicemail: bool = True,
         allow_interruptions: bool = True,
         **kwargs,
@@ -191,19 +182,18 @@ class GladiaSTTService(STTService):
         logger.debug(f"Detect voicemail: {self.detect_voicemail}")
         logger.debug(f"Model: {self._model}")
         
-        # Map model to appropriate settings for performance and call scenarios
+        # Optimized settings for low latency
         if params.model == "solaria-1":
-            # Optimize for call scenarios - balance accuracy and noise reduction
             if params.speech_threshold is None:
-                params.speech_threshold = 0.80  # Higher threshold for faster detection
+                params.speech_threshold = 0.65  # Lowered for faster detection
             if params.audio_enhancer is None:
-                params.audio_enhancer = False   # Disable to reduce processing latency
+                params.audio_enhancer = False  
             if params.words_accurate_timestamps is None:
-                params.words_accurate_timestamps = False  # Disable for faster response
+                params.words_accurate_timestamps = False 
             if params.endpointing is None:
-                params.endpointing = 0.08  # Even faster endpointing (was 0.15)
+                params.endpointing = 0.05  # Much more aggressive endpointing
             if params.maximum_duration_without_endpointing is None:
-                params.maximum_duration_without_endpointing = 8  # Shorter duration
+                params.maximum_duration_without_endpointing = 4  # Shorter timeout 
         
         self._settings = {
             "encoding": "wav/pcm",
@@ -225,6 +215,9 @@ class GladiaSTTService(STTService):
             "realtime_processing": {
                 "words_accurate_timestamps": params.words_accurate_timestamps,
             },
+            # Enable streaming optimizations
+            "streaming": True,
+            "interim_results": True,  # Critical for low latency
         }
         
         self._confidence = confidence
@@ -232,32 +225,34 @@ class GladiaSTTService(STTService):
         self._receive_task = None
         self._async_handler_task = None
         
-        # State management matching Deepgram
         self._user_speaking = False
         self._bot_speaking = True
         self._on_no_punctuation_seconds = on_no_punctuation_seconds
         self._vad_active = False
         
-        # Message handling state
         self._first_message = None
         self._first_message_time = None
         self._last_interim_time = None
-        self._restarted = False  # Match Deepgram initialization
+        self._restarted = False  
         
-        # Accumulation handling
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
         self._last_time_transcription = time.time()
         self._was_first_transcript_receipt = False
         
+        # Performance tracking
         self.start_time = time.time()
+        self._stt_response_times = [] 
+        self._current_speech_start_time = None  
+        self._last_audio_chunk_time = None 
+        self._transcript_start_times = {}  
+        self._audio_chunk_count = 0  
         
-        # Enhanced response time tracking
-        self._stt_response_times = []  # List to store STT response durations
-        self._current_speech_start_time = None  # Track when speech detection starts
-        self._last_audio_chunk_time = None  # Track last audio chunk received
-        self._transcript_start_times = {}  # Track start times for different transcripts
-        self._audio_chunk_count = 0  # Count audio chunks for debugging
+        # New streaming optimization variables
+        self._interim_buffer = ""
+        self._last_interim_sent = ""
+        self._interim_confidence_threshold = 0.2  # Very low for interim results
+        self._streaming_word_count = 0  
 
     def _time_since_init(self):
         return time.time() - self.start_time
@@ -341,7 +336,7 @@ class GladiaSTTService(STTService):
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
-        self._restarted = True  # Set like Deepgram on start
+        self._restarted = True 
         await self._connect()
 
     async def stop(self, frame: EndFrame):
@@ -353,12 +348,10 @@ class GladiaSTTService(STTService):
         await self._disconnect()
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
-        # Enhanced timing tracking
         current_time = time.perf_counter()
         self._last_audio_chunk_time = current_time
         self._audio_chunk_count += 1
         
-        # Start timing when we receive first audio after speech detection
         if self._current_speech_start_time is None:
             self._current_speech_start_time = current_time
             logger.debug(f"🎤 Gladia: Starting speech detection timer at chunk #{self._audio_chunk_count}")
@@ -463,14 +456,16 @@ class GladiaSTTService(STTService):
     
     # Accumulation handling matching Deepgram
     async def _async_handle_accum_transcription(self, current_time):
-        # Use shorter timeout for better responsiveness
-        if current_time - self._last_time_accum_transcription > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
-            logger.debug("Sending accum transcription because of timeout")
+        # More aggressive timeouts for faster response
+        timeout_threshold = min(self._on_no_punctuation_seconds, 0.4)  # Cap at 400ms
+        
+        if current_time - self._last_time_accum_transcription > timeout_threshold and len(self._accum_transcription_frames):
+            logger.debug(f"Sending accum transcription after {timeout_threshold}s timeout")
             await self._send_accum_transcriptions()
         
-        # Also send if we haven't had any activity for a while and have frames
-        elif len(self._accum_transcription_frames) > 0 and current_time - self._last_time_accum_transcription > 1.0:
-            logger.debug("Sending accum transcription because of extended inactivity")
+        # Send immediately if we have interim buffer and some accumulated frames
+        elif len(self._accum_transcription_frames) > 0 and self._interim_buffer and current_time - self._last_time_accum_transcription > 0.2:
+            logger.debug("Fast-sending accum transcription with interim buffer")
             await self._send_accum_transcriptions()
 
     async def _handle_false_interim(self, current_time):
@@ -491,7 +486,7 @@ class GladiaSTTService(STTService):
     
     async def _async_handler(self):
         while True:
-            await asyncio.sleep(0.1)  # Match Deepgram's timing
+            await asyncio.sleep(0.05)  # Faster polling for better responsiveness
             
             current_time = time.time()
             await self._async_handle_accum_transcription(current_time)
@@ -542,27 +537,36 @@ class GladiaSTTService(STTService):
         
         return is_equivalent_basic(text, self._first_message)    
     async def _should_ignore_transcription(self, transcript: str, is_final: bool, confidence: float):
-        # Fast path: check confidence first (most common rejection)
-        if not is_final and confidence < 0.6:
-            return True
+        # Optimized for streaming performance
+        
+        # For interim results, be very permissive to enable fast streaming
+        if not is_final:
+            # Only reject if confidence is extremely low
+            if confidence < self._interim_confidence_threshold:
+                return True
+            
+            # Allow single words for interim if confidence is reasonable
+            if self._transcript_words_count(transcript) == 1 and confidence < 0.3:
+                return True
+                
+            # Be less strict about bot speaking for interim results
+            if self._bot_speaking and not self._allow_stt_interruptions and confidence < 0.4:
+                logger.debug(f"Ignoring interim during bot speaking (low confidence): {transcript}")
+                return True
+        else:
+            # For final results, use slightly higher threshold but still permissive
+            if confidence < self._confidence:
+                return True
 
-        # For single words, use higher confidence threshold matching your config
-        if self._transcript_words_count(transcript) == 1 and confidence < 0.7:
-            return True
+            # For single words, use moderate confidence threshold
+            if self._transcript_words_count(transcript) == 1 and confidence < 0.5:
+                return True
         
-        # Early exit for bot speaking scenarios - more aggressive like Deepgram
+        # Early exit for bot speaking scenarios - but allow high-confidence interruptions
         if self._bot_speaking and not self._allow_stt_interruptions:
-            logger.debug(f"Ignoring transcription: bot speaking and no interruptions allowed")
-            return True
-        
-        # Also ignore if bot speaking and single word (likely false positive)
-        if self._bot_speaking and self._transcript_words_count(transcript) == 1:
-            logger.debug(f"Ignoring single word during bot speaking: {transcript}")
-            return True
-        
-        # Check VAD state only if needed
-        if not self._vad_active and not is_final:
-            return True
+            if is_final and confidence < 0.7:  # Only block low-confidence finals during bot speech
+                logger.debug(f"Ignoring transcription: bot speaking and confidence too low")
+                return True
         
         # Less frequent checks last
         if self._should_ignore_first_repeated_message(transcript):
@@ -589,48 +593,51 @@ class GladiaSTTService(STTService):
         return True
     
     async def _on_final_transcript_message(self, transcript, language):
-        # Create the frame first
         frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
         
-        # Handle first message tracking like Deepgram
         self._handle_first_message(frame.text)
         self._was_first_transcript_receipt = True
         
-        # For FastTextAggregator compatibility, we need to handle this exactly like Deepgram:
-        # 1. Ensure user speaking state is set properly
-        # 2. Send the transcription frame
-        # 3. Handle user silence to trigger processing
-        
-        # Ensure user is marked as speaking before sending transcription
         if not self._user_speaking:
             await self._handle_user_speaking()
-            # Small delay to ensure proper frame sequencing
             await asyncio.sleep(0.001)
         
-        # Send the transcription frame directly (like Deepgram does)
         await self.push_frame(frame)
         
-        # Mark that transcription was received
         self._last_time_transcription = time.time()
         
-        # Small delay before user silence to ensure proper frame ordering
         await asyncio.sleep(0.001)
-        
-        # For final transcripts, we should trigger user silence to allow processing
-        # This matches Deepgram's behavior where final transcripts trigger processing
         await self._handle_user_silence()
         
-        # Stop processing metrics after handling the final transcript
         await self.stop_processing_metrics()
     
     async def _on_interim_transcript_message(self, transcript, language):
         self._last_interim_time = time.time()
-        # Only handle user speaking for interim if not already handled
+        
+        # Store interim for potential accumulation like Deepgram
+        self._interim_buffer = transcript
+        
+        # Always trigger user speaking state for interim results
         if not self._user_speaking:
             await self._handle_user_speaking()
+        
+        # Send interim frame immediately for streaming
         await self.push_frame(
             InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
         )
+        
+        # Count words for streaming optimization
+        word_count = self._transcript_words_count(transcript)
+        self._streaming_word_count = word_count
+        
+        # For longer interim results, start accumulating for faster final processing
+        if word_count >= 3:  # Start accumulating multi-word interim results
+            frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
+            if self._is_accum_transcription(transcript):
+                self._append_accum_transcription(frame)
+                logger.debug(f"Accumulated interim transcript for streaming: {transcript}")
+        
+        logger.debug(f"📢 Interim sent: '{transcript}' (words: {word_count})")
 
     async def _receive_task_handler(self):
         if not self._restarted:
@@ -644,49 +651,49 @@ class GladiaSTTService(STTService):
                     
                 utterance = content["data"]["utterance"]
                 confidence = utterance.get("confidence", 0)
-                
-                # Fast confidence check before processing transcript
-                if confidence < self._confidence:
-                    continue
-                    
                 transcript = utterance["text"]
                 is_final = content["data"]["is_final"]
                 
-                # Stop TTFB metrics when we get first transcript
+                # Fast path: ignore empty transcripts
+                if not transcript.strip():
+                    continue
+                
+                # Stop TTFB metrics as soon as we get any transcript
                 if len(transcript) > 0:
                     await self.stop_ttfb_metrics()
                 
-                # Enhanced response time measurement for final transcripts
+                # Track performance for final transcripts
                 if is_final and self._current_speech_start_time is not None:
                     elapsed = time.perf_counter() - self._current_speech_start_time
                     elapsed_formatted = round(elapsed, 3)
                     self._stt_response_times.append(elapsed_formatted)
                     
-                    # Log detailed timing information
                     logger.debug(f"📊 Gladia STT Response Time: {elapsed_formatted}s")
                     logger.debug(f"   📝 Transcript: '{transcript}'")
                     logger.debug(f"   🎯 Confidence: {confidence:.2f}")
                     logger.debug(f"   📦 Audio chunks processed: {self._audio_chunk_count}")
                     
-                    # Reset timing for next speech segment
                     self._current_speech_start_time = None
                     self._audio_chunk_count = 0
                 
-                # Detect and handle voicemail
+                # Early voicemail detection
                 if await self._detect_and_handle_voicemail(transcript):
                     return
                 
-                # Check if we should ignore this transcription
+                # Use optimized transcription filtering
                 if await self._should_ignore_transcription(transcript, is_final, confidence):
                     continue
                 
-                # Extract language if available
                 language = self.language
                 
+                # Process transcripts immediately without additional delays
                 if is_final:
                     await self._on_final_transcript_message(transcript, language)
                     self._last_time_transcription = time.time()
+                    # Clear interim buffer on final
+                    self._interim_buffer = ""
                 else:
+                    # Process interim immediately
                     await self._on_interim_transcript_message(transcript, language)
                             
             except Exception as e:
@@ -706,24 +713,19 @@ class GladiaSTTService(STTService):
         if isinstance(frame, STTRestartFrame):
             logger.debug("Received STT Restart Frame")
             self._restarted = True
-            # Clear any accumulated transcriptions on restart like Deepgram
             self._accum_transcription_frames = []
             await self._disconnect()
             await self._connect()
             return
 
         if isinstance(frame, UserStartedSpeakingFrame):
-            # Start metrics if pipeline VAD has detected speech
             await self.start_ttfb_metrics()
             await self.start_processing_metrics()
-            # Reset timing when user starts speaking
             self._current_speech_start_time = time.perf_counter()
             self._audio_chunk_count = 0
             logger.debug(f"🎤 Gladia: User started speaking - resetting timer")
         elif isinstance(frame, UserStoppedSpeakingFrame):
-            # Handle end of speech similar to Deepgram finalize
             logger.trace(f"Triggered finalize equivalent on: {frame.name}, {direction}")
-            # Send any accumulated transcriptions immediately when user stops speaking
             if len(self._accum_transcription_frames) > 0:
                 logger.debug("Sending accumulated transcriptions on UserStoppedSpeaking")
                 await self._send_accum_transcriptions()
@@ -733,14 +735,10 @@ class GladiaSTTService(STTService):
         elif isinstance(frame, VADActiveFrame):
             self._vad_active = True
             
-        # Handle interruption frames properly like Deepgram
         if isinstance(frame, StartInterruptionFrame):
             logger.debug("Received StartInterruptionFrame - clearing accumulated transcriptions")
-            # Clear accumulated transcriptions when interrupted to prevent queued speech
             self._accum_transcription_frames = []
-            # Reset accumulation time to prevent immediate timeout
             self._last_time_accum_transcription = time.time()
-            # Reset user speaking state if needed
             if self._user_speaking:
                 await self._handle_user_silence()
 
