@@ -389,6 +389,8 @@ class GladiaSTTService(STTService):
 
     async def _setup_gladia(self):
         async with aiohttp.ClientSession() as session:
+            logger.debug("Setting up Gladia session with parameters")
+            logger.debug(f"Gladia settings: {self._settings}")
             async with session.post(
                 self._url,
                 headers={"X-Gladia-Key": self._api_key, "Content-Type": "application/json"},
