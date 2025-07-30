@@ -181,19 +181,7 @@ class GladiaSTTService(STTService):
         logger.debug(f"Allow interruptions: {self._allow_stt_interruptions}")
         logger.debug(f"Detect voicemail: {self.detect_voicemail}")
         logger.debug(f"Model: {self._model}")
-        
-        # Optimized settings for low latency
-        if params.model == "solaria-1":
-            if params.speech_threshold is None:
-                params.speech_threshold = 0.65  # Lowered for faster detection
-            if params.audio_enhancer is None:
-                params.audio_enhancer = False  
-            if params.words_accurate_timestamps is None:
-                params.words_accurate_timestamps = False 
-            if params.endpointing is None:
-                params.endpointing = 0.05  # Much more aggressive endpointing
-            if params.maximum_duration_without_endpointing is None:
-                params.maximum_duration_without_endpointing = 4  # Shorter timeout 
+    
         
         self._settings = {
             "encoding": "wav/pcm",
