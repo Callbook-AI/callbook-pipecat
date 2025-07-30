@@ -319,9 +319,11 @@ class DeepgramSTTService(STTService):
 
         self.start_time = time.time()
         
-        # Response time tracking
+        # Enhanced response time tracking
         self._stt_response_times = []  # List to store STT response durations
-        self._current_request_start_time = None  # Track current request start time
+        self._current_speech_start_time = None  # Track when speech detection starts
+        self._last_audio_chunk_time = None  # Track last audio chunk received
+        self._audio_chunk_count = 0  # Count audio chunks for debugging
 
 
     @property
@@ -367,6 +369,38 @@ class DeepgramSTTService(STTService):
     def clear_stt_response_times(self):
         """Clear the list of STT response durations."""
         self._stt_response_times.clear()
+    
+    def get_stt_stats(self) -> Dict:
+        """Get comprehensive STT performance statistics."""
+        if not self._stt_response_times:
+            return {
+                "count": 0,
+                "average": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+                "latest": 0.0
+            }
+        
+        return {
+            "count": len(self._stt_response_times),
+            "average": round(sum(self._stt_response_times) / len(self._stt_response_times), 3),
+            "min": round(min(self._stt_response_times), 3),
+            "max": round(max(self._stt_response_times), 3),
+            "latest": round(self._stt_response_times[-1], 3) if self._stt_response_times else 0.0,
+            "all_times": [round(t, 3) for t in self._stt_response_times]
+        }
+    
+    def log_stt_performance(self):
+        """Log STT performance statistics."""
+        stats = self.get_stt_stats()
+        if stats["count"] > 0:
+            logger.info(f"🎯 Deepgram STT Performance Summary:")
+            logger.info(f"   📊 Total responses: {stats['count']}")
+            logger.info(f"   ⏱️  Average time: {stats['average']}s")
+            logger.info(f"   🏃 Fastest: {stats['min']}s")
+            logger.info(f"   🐌 Slowest: {stats['max']}s")
+            logger.info(f"   🕐 Latest: {stats['latest']}s")
+            logger.info(f"   📈 All times: {stats['all_times']}")
 
     async def set_model(self, model: str):
         try:
@@ -424,6 +458,16 @@ class DeepgramSTTService(STTService):
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
         try:
+            # Enhanced timing tracking
+            current_time = time.perf_counter()
+            self._last_audio_chunk_time = current_time
+            self._audio_chunk_count += 1
+            
+            # Start timing when we receive first audio after speech detection
+            if self._current_speech_start_time is None:
+                self._current_speech_start_time = current_time
+                logger.debug(f"🎤 Deepgram: Starting speech detection timer at chunk #{self._audio_chunk_count}")
+            
             await self._connection.send(audio)
             if self._sibling_deepgram:
                 await self._sibling_deepgram.send_audio(audio)
@@ -716,7 +760,6 @@ class DeepgramSTTService(STTService):
             if len(transcript) > 0:
                 await self.stop_ttfb_metrics()
 
-
                 if await self._detect_and_handle_voicemail(transcript):
                     return 
                 
@@ -727,13 +770,21 @@ class DeepgramSTTService(STTService):
                     return
                 
                 if is_final:
-                    # Calculate and store response duration for final transcripts
-                    if self._current_request_start_time is not None:
-                        elapsed = time.perf_counter() - self._current_request_start_time
+                    # Enhanced response time measurement for final transcripts
+                    if self._current_speech_start_time is not None:
+                        elapsed = time.perf_counter() - self._current_speech_start_time
                         elapsed_formatted = round(elapsed, 3)
                         self._stt_response_times.append(elapsed_formatted)
-                        logger.debug(f"Deepgram STT response duration: {elapsed_formatted}s")
-                        self._current_request_start_time = None  # Reset for next request
+                        
+                        # Log detailed timing information
+                        logger.debug(f"📊 Deepgram STT Response Time: {elapsed_formatted}s")
+                        logger.debug(f"   📝 Transcript: '{transcript}'")
+                        logger.debug(f"   🎯 Confidence: {confidence:.2f}")
+                        logger.debug(f"   📦 Audio chunks processed: {self._audio_chunk_count}")
+                        
+                        # Reset timing for next speech segment
+                        self._current_speech_start_time = None
+                        self._audio_chunk_count = 0
                     
                     await self._on_final_transcript_message(transcript, language, speech_final)
                     self._last_time_transcription = start_time
@@ -766,6 +817,10 @@ class DeepgramSTTService(STTService):
         if isinstance(frame, UserStartedSpeakingFrame) and not self.vad_enabled:
             # Start metrics if Deepgram VAD is disabled & pipeline VAD has detected speech
             await self.start_metrics()
+            # Reset timing when user starts speaking
+            self._current_speech_start_time = time.perf_counter()
+            self._audio_chunk_count = 0
+            logger.debug(f"🎤 Deepgram: User started speaking - resetting timer")
         elif isinstance(frame, UserStoppedSpeakingFrame):
             # https://developers.deepgram.com/docs/finalize
             await self._connection.finalize()

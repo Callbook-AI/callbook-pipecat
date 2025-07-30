@@ -252,9 +252,12 @@ class GladiaSTTService(STTService):
         
         self.start_time = time.time()
         
-        # Response time tracking
+        # Enhanced response time tracking
         self._stt_response_times = []  # List to store STT response durations
-        self._current_request_start_time = None  # Track current request start time
+        self._current_speech_start_time = None  # Track when speech detection starts
+        self._last_audio_chunk_time = None  # Track last audio chunk received
+        self._transcript_start_times = {}  # Track start times for different transcripts
+        self._audio_chunk_count = 0  # Count audio chunks for debugging
 
     def _time_since_init(self):
         return time.time() - self.start_time
@@ -275,6 +278,38 @@ class GladiaSTTService(STTService):
     def clear_stt_response_times(self):
         """Clear the list of STT response durations."""
         self._stt_response_times.clear()
+    
+    def get_stt_stats(self) -> Dict:
+        """Get comprehensive STT performance statistics."""
+        if not self._stt_response_times:
+            return {
+                "count": 0,
+                "average": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+                "latest": 0.0
+            }
+        
+        return {
+            "count": len(self._stt_response_times),
+            "average": round(sum(self._stt_response_times) / len(self._stt_response_times), 3),
+            "min": round(min(self._stt_response_times), 3),
+            "max": round(max(self._stt_response_times), 3),
+            "latest": round(self._stt_response_times[-1], 3) if self._stt_response_times else 0.0,
+            "all_times": [round(t, 3) for t in self._stt_response_times]
+        }
+    
+    def log_stt_performance(self):
+        """Log STT performance statistics."""
+        stats = self.get_stt_stats()
+        if stats["count"] > 0:
+            logger.info(f"🎯 Gladia STT Performance Summary:")
+            logger.info(f"   📊 Total responses: {stats['count']}")
+            logger.info(f"   ⏱️  Average time: {stats['average']}s")
+            logger.info(f"   🏃 Fastest: {stats['min']}s")
+            logger.info(f"   🐌 Slowest: {stats['max']}s")
+            logger.info(f"   🕐 Latest: {stats['latest']}s")
+            logger.info(f"   📈 All times: {stats['all_times']}")
 
     def language_to_service_language(self, language: Language) -> Optional[str]:
         return language_to_gladia_language(language)
@@ -318,9 +353,15 @@ class GladiaSTTService(STTService):
         await self._disconnect()
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
-        # Start timing for this audio chunk
-        if self._current_request_start_time is None:
-            self._current_request_start_time = time.perf_counter()
+        # Enhanced timing tracking
+        current_time = time.perf_counter()
+        self._last_audio_chunk_time = current_time
+        self._audio_chunk_count += 1
+        
+        # Start timing when we receive first audio after speech detection
+        if self._current_speech_start_time is None:
+            self._current_speech_start_time = current_time
+            logger.debug(f"🎤 Gladia: Starting speech detection timer at chunk #{self._audio_chunk_count}")
         
         await self.start_processing_metrics()
         await self._send_audio(audio)
@@ -615,12 +656,21 @@ class GladiaSTTService(STTService):
                 if len(transcript) > 0:
                     await self.stop_ttfb_metrics()
                 
-                # Calculate and store response duration for final transcripts
-                if is_final and self._current_request_start_time is not None:
-                    elapsed = time.perf_counter() - self._current_request_start_time
+                # Enhanced response time measurement for final transcripts
+                if is_final and self._current_speech_start_time is not None:
+                    elapsed = time.perf_counter() - self._current_speech_start_time
                     elapsed_formatted = round(elapsed, 3)
                     self._stt_response_times.append(elapsed_formatted)
-                    self._current_request_start_time = None  # Reset for next request
+                    
+                    # Log detailed timing information
+                    logger.debug(f"📊 Gladia STT Response Time: {elapsed_formatted}s")
+                    logger.debug(f"   📝 Transcript: '{transcript}'")
+                    logger.debug(f"   🎯 Confidence: {confidence:.2f}")
+                    logger.debug(f"   📦 Audio chunks processed: {self._audio_chunk_count}")
+                    
+                    # Reset timing for next speech segment
+                    self._current_speech_start_time = None
+                    self._audio_chunk_count = 0
                 
                 # Detect and handle voicemail
                 if await self._detect_and_handle_voicemail(transcript):
@@ -666,8 +716,10 @@ class GladiaSTTService(STTService):
             # Start metrics if pipeline VAD has detected speech
             await self.start_ttfb_metrics()
             await self.start_processing_metrics()
-            if self._current_request_start_time is None:
-                self._current_request_start_time = time.perf_counter()
+            # Reset timing when user starts speaking
+            self._current_speech_start_time = time.perf_counter()
+            self._audio_chunk_count = 0
+            logger.debug(f"🎤 Gladia: User started speaking - resetting timer")
         elif isinstance(frame, UserStoppedSpeakingFrame):
             # Handle end of speech similar to Deepgram finalize
             logger.trace(f"Triggered finalize equivalent on: {frame.name}, {direction}")
