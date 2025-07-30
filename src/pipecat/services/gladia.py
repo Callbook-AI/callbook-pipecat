@@ -50,10 +50,10 @@ except ModuleNotFoundError as e:
 
 
 # Constants matching Deepgram service
-DEFAULT_ON_NO_PUNCTUATION_SECONDS = 1.5  # Reduced from 3
-IGNORE_REPEATED_MSG_AT_START_SECONDS = 3  # Reduced from 4
-VOICEMAIL_DETECTION_SECONDS = 8          # Reduced from 10
-FALSE_INTERIM_SECONDS = 1.0              # Reduced from 1.3
+DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3  # Match Deepgram exactly
+IGNORE_REPEATED_MSG_AT_START_SECONDS = 4  # Match Deepgram exactly  
+VOICEMAIL_DETECTION_SECONDS = 10          # Match Deepgram exactly
+FALSE_INTERIM_SECONDS = 1.3              # Match Deepgram exactly
 
 
 def language_to_gladia_language(language: Language) -> Optional[str]:
@@ -242,7 +242,7 @@ class GladiaSTTService(STTService):
         self._first_message = None
         self._first_message_time = None
         self._last_interim_time = None
-        self._restarted = True  # Initialize to True so message processing works from start
+        self._restarted = False  # Match Deepgram initialization
         
         # Accumulation handling
         self._accum_transcription_frames = []
@@ -306,6 +306,7 @@ class GladiaSTTService(STTService):
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
+        self._restarted = True  # Set like Deepgram on start
         await self._connect()
 
     async def stop(self, frame: EndFrame):
@@ -393,12 +394,14 @@ class GladiaSTTService(STTService):
     async def _handle_user_speaking(self):
         # Only push interruption frame if bot is actually speaking
         if self._bot_speaking:
+            logger.debug("Pushing StartInterruptionFrame - bot was speaking")
             await self.push_frame(StartInterruptionFrame())
         
         if self._user_speaking:
             return
 
         self._user_speaking = True
+        logger.debug("User started speaking")
         await self.push_frame(UserStartedSpeakingFrame())
 
     async def _handle_user_silence(self):
@@ -406,12 +409,15 @@ class GladiaSTTService(STTService):
             return
 
         self._user_speaking = False
+        logger.debug("User stopped speaking")
         await self.push_frame(UserStoppedSpeakingFrame())
 
     async def _handle_bot_speaking(self):
+        logger.debug("Bot started speaking - setting bot_speaking=True")
         self._bot_speaking = True
 
     async def _handle_bot_silence(self):
+        logger.debug("Bot stopped speaking - setting bot_speaking=False")  
         self._bot_speaking = False
     
     # Accumulation handling matching Deepgram
@@ -438,7 +444,7 @@ class GladiaSTTService(STTService):
     
     async def _async_handler(self):
         while True:
-            await asyncio.sleep(0.05)  # Reduced from 0.1 for faster processing
+            await asyncio.sleep(0.1)  # Match Deepgram's timing
             
             current_time = time.time()
             await self._async_handle_accum_transcription(current_time)
@@ -448,12 +454,14 @@ class GladiaSTTService(STTService):
         if not len(self._accum_transcription_frames):
             return
 
-        # Send transcriptions immediately without extra user speaking frames
-        # to reduce frame processing overhead
+        # Send transcriptions with proper user speaking frame handling like Deepgram
+        await self._handle_user_speaking()
+        
         for frame in self._accum_transcription_frames:
             await self.push_frame(frame)
         self._accum_transcription_frames = []
 
+        await self._handle_user_silence()
         await self.stop_processing_metrics()
 
     def _is_accum_transcription(self, text: str):
@@ -488,11 +496,18 @@ class GladiaSTTService(STTService):
         if not is_final and confidence < 0.6:
             return True
 
+        # For single words, use higher confidence threshold matching your config
         if self._transcript_words_count(transcript) == 1 and confidence < 0.7:
             return True
         
-        # Early exit for bot speaking scenarios
+        # Early exit for bot speaking scenarios - more aggressive like Deepgram
         if self._bot_speaking and not self._allow_stt_interruptions:
+            logger.debug(f"Ignoring transcription: bot speaking and no interruptions allowed")
+            return True
+        
+        # Also ignore if bot speaking and single word (likely false positive)
+        if self._bot_speaking and self._transcript_words_count(transcript) == 1:
+            logger.debug(f"Ignoring single word during bot speaking: {transcript}")
             return True
         
         # Check VAD state only if needed
@@ -524,7 +539,8 @@ class GladiaSTTService(STTService):
         return True
     
     async def _on_final_transcript_message(self, transcript, language):
-        # Skip user speaking frame handling for final transcripts to reduce overhead
+        # Handle user speaking for final transcripts like Deepgram
+        await self._handle_user_speaking()
         frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
 
         self._handle_first_message(frame.text)
@@ -607,6 +623,8 @@ class GladiaSTTService(STTService):
         if isinstance(frame, STTRestartFrame):
             logger.debug("Received STT Restart Frame")
             self._restarted = True
+            # Clear any accumulated transcriptions on restart like Deepgram
+            self._accum_transcription_frames = []
             await self._disconnect()
             await self._connect()
             return
@@ -625,4 +643,13 @@ class GladiaSTTService(STTService):
             self._vad_active = False
         elif isinstance(frame, VADActiveFrame):
             self._vad_active = True
+            
+        # Handle interruption frames properly like Deepgram
+        if isinstance(frame, StartInterruptionFrame):
+            logger.debug("Received StartInterruptionFrame - clearing accumulated transcriptions")
+            # Clear accumulated transcriptions when interrupted to prevent queued speech
+            self._accum_transcription_frames = []
+            # Reset user speaking state if needed
+            if self._user_speaking:
+                await self._handle_user_silence()
 
