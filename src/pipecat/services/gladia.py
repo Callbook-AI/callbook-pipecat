@@ -181,21 +181,34 @@ class GladiaSTTService(STTService):
         logger.debug(f"Allow interruptions: {self._allow_stt_interruptions}")
         logger.debug(f"Detect voicemail: {self.detect_voicemail}")
         logger.debug(f"Model: {self._model}")
-    
+        
+        # Optimized settings for low latency
+        if params.model == "solaria-1":
+            if params.speech_threshold is None:
+                params.speech_threshold = 0.65  # Lowered for faster detection
+            if params.audio_enhancer is None:
+                params.audio_enhancer = False  
+            if params.words_accurate_timestamps is None:
+                params.words_accurate_timestamps = False 
+            if params.endpointing is None:
+                params.endpointing = 0.05  # Much more aggressive endpointing
+            if params.maximum_duration_without_endpointing is None:
+                params.maximum_duration_without_endpointing = 4  # Shorter timeout
         
         self._settings = {
             "encoding": "wav/pcm",
             "bit_depth": 16,
-            "sample_rate": 0,
+            "sample_rate": 0,  # Will be set in _connect()
             "channels": 1,
+            "model": params.model,  # Required top-level field
+            "endpointing": params.endpointing,
+            "maximum_duration_without_endpointing": params.maximum_duration_without_endpointing,
             "language_config": {
                 "languages": [self.language_to_service_language(params.language)]
                 if params.language
                 else [],
                 "code_switching": False,
             },
-            "endpointing": params.endpointing,
-            "maximum_duration_without_endpointing": params.maximum_duration_without_endpointing,
             "pre_processing": {
                 "audio_enhancer": params.audio_enhancer,
                 "speech_threshold": params.speech_threshold,
@@ -203,9 +216,17 @@ class GladiaSTTService(STTService):
             "realtime_processing": {
                 "words_accurate_timestamps": params.words_accurate_timestamps,
             },
-            # Enable streaming optimizations
-            "streaming": True,
-            "interim_results": True,  # Critical for low latency
+            # Required messages_config for WebSocket events
+            "messages_config": {
+                "receive_final_transcripts": True,
+                "receive_speech_events": True,
+                "receive_pre_processing_events": True,
+                "receive_realtime_processing_events": True,
+                "receive_post_processing_events": True,
+                "receive_acknowledgments": True,
+                "receive_errors": True,
+                "receive_lifecycle_events": False
+            }
         }
         
         self._confidence = confidence
@@ -236,11 +257,9 @@ class GladiaSTTService(STTService):
         self._transcript_start_times = {}  
         self._audio_chunk_count = 0  
         
-        # New streaming optimization variables
-        self._interim_buffer = ""
-        self._last_interim_sent = ""
-        self._interim_confidence_threshold = 0.2  # Very low for interim results
-        self._streaming_word_count = 0  
+        # New streaming optimization variables (limited without interim support)
+        self._last_transcript_time = None
+        self._fast_response_mode = True  # Focus on fastest final results  
 
     def _time_since_init(self):
         return time.time() - self.start_time
@@ -446,16 +465,16 @@ class GladiaSTTService(STTService):
     
     # Accumulation handling matching Deepgram
     async def _async_handle_accum_transcription(self, current_time):
-        # More aggressive timeouts for faster response
-        timeout_threshold = min(self._on_no_punctuation_seconds, 0.4)  # Cap at 400ms
+        # More aggressive timeouts for faster response (no interim results available)
+        timeout_threshold = min(self._on_no_punctuation_seconds, 0.3)  # Cap at 300ms for max speed
         
         if current_time - self._last_time_accum_transcription > timeout_threshold and len(self._accum_transcription_frames):
             logger.debug(f"Sending accum transcription after {timeout_threshold}s timeout")
             await self._send_accum_transcriptions()
         
-        # Send immediately if we have interim buffer and some accumulated frames
-        elif len(self._accum_transcription_frames) > 0 and self._interim_buffer and current_time - self._last_time_accum_transcription > 0.2:
-            logger.debug("Fast-sending accum transcription with interim buffer")
+        # Send immediately if we have accumulated frames and some time has passed
+        elif len(self._accum_transcription_frames) > 0 and current_time - self._last_time_accum_transcription > 0.15:
+            logger.debug("Fast-sending accum transcription")
             await self._send_accum_transcriptions()
 
     async def _handle_false_interim(self, current_time):
@@ -527,38 +546,23 @@ class GladiaSTTService(STTService):
         
         return is_equivalent_basic(text, self._first_message)    
     async def _should_ignore_transcription(self, transcript: str, is_final: bool, confidence: float):
-        # Optimized for streaming performance
+        # Optimized for fastest final results (no interim support in Solaria-1)
         
-        # For interim results, be very permissive to enable fast streaming
-        if not is_final:
-            # Only reject if confidence is extremely low
-            if confidence < self._interim_confidence_threshold:
-                return True
-            
-            # Allow single words for interim if confidence is reasonable
-            if self._transcript_words_count(transcript) == 1 and confidence < 0.3:
-                return True
-                
-            # Be less strict about bot speaking for interim results
-            if self._bot_speaking and not self._allow_stt_interruptions and confidence < 0.4:
-                logger.debug(f"Ignoring interim during bot speaking (low confidence): {transcript}")
-                return True
-        else:
-            # For final results, use slightly higher threshold but still permissive
-            if confidence < self._confidence:
-                return True
+        # For final results, use aggressive but reasonable thresholds
+        if confidence < self._confidence:
+            return True
 
-            # For single words, use moderate confidence threshold
-            if self._transcript_words_count(transcript) == 1 and confidence < 0.5:
-                return True
+        # For single words, use lower confidence threshold for speed
+        if self._transcript_words_count(transcript) == 1 and confidence < 0.4:
+            return True
         
-        # Early exit for bot speaking scenarios - but allow high-confidence interruptions
+        # Allow interruptions with reasonable confidence
         if self._bot_speaking and not self._allow_stt_interruptions:
-            if is_final and confidence < 0.7:  # Only block low-confidence finals during bot speech
+            if confidence < 0.6:  # Only block low-confidence during bot speech
                 logger.debug(f"Ignoring transcription: bot speaking and confidence too low")
                 return True
         
-        # Less frequent checks last
+        # Skip repeated first messages
         if self._should_ignore_first_repeated_message(transcript):
             return True
 
