@@ -422,8 +422,14 @@ class GladiaSTTService(STTService):
     
     # Accumulation handling matching Deepgram
     async def _async_handle_accum_transcription(self, current_time):
+        # Use shorter timeout for better responsiveness
         if current_time - self._last_time_accum_transcription > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
             logger.debug("Sending accum transcription because of timeout")
+            await self._send_accum_transcriptions()
+        
+        # Also send if we haven't had any activity for a while and have frames
+        elif len(self._accum_transcription_frames) > 0 and current_time - self._last_time_accum_transcription > 1.0:
+            logger.debug("Sending accum transcription because of extended inactivity")
             await self._send_accum_transcriptions()
 
     async def _handle_false_interim(self, current_time):
@@ -457,8 +463,11 @@ class GladiaSTTService(STTService):
         # Send transcriptions with proper user speaking frame handling like Deepgram
         await self._handle_user_speaking()
         
+        # Send all frames at once for better compatibility with text aggregators
         for frame in self._accum_transcription_frames:
             await self.push_frame(frame)
+        
+        # Clear frames before sending user silence to prevent re-processing
         self._accum_transcription_frames = []
 
         await self._handle_user_silence()
@@ -546,8 +555,9 @@ class GladiaSTTService(STTService):
         self._handle_first_message(frame.text)
         self._append_accum_transcription(frame)
         self._was_first_transcript_receipt = True
-        if not self._is_accum_transcription(frame.text):
-            await self._send_accum_transcriptions()
+        # Send final transcriptions immediately, regardless of punctuation
+        # This matches Deepgram behavior and prevents delays
+        await self._send_accum_transcriptions()
     
     async def _on_interim_transcript_message(self, transcript, language):
         self._last_interim_time = time.time()
@@ -638,6 +648,10 @@ class GladiaSTTService(STTService):
         elif isinstance(frame, UserStoppedSpeakingFrame):
             # Handle end of speech similar to Deepgram finalize
             logger.trace(f"Triggered finalize equivalent on: {frame.name}, {direction}")
+            # Send any accumulated transcriptions immediately when user stops speaking
+            if len(self._accum_transcription_frames) > 0:
+                logger.debug("Sending accumulated transcriptions on UserStoppedSpeaking")
+                await self._send_accum_transcriptions()
         
         if isinstance(frame, VADInactiveFrame):
             self._vad_active = False
@@ -649,6 +663,8 @@ class GladiaSTTService(STTService):
             logger.debug("Received StartInterruptionFrame - clearing accumulated transcriptions")
             # Clear accumulated transcriptions when interrupted to prevent queued speech
             self._accum_transcription_frames = []
+            # Reset accumulation time to prevent immediate timeout
+            self._last_time_accum_transcription = time.time()
             # Reset user speaking state if needed
             if self._user_speaking:
                 await self._handle_user_silence()
