@@ -672,6 +672,9 @@ class GoogleLLMContext(OpenAILLMContext):
     ):
         super().__init__(messages=messages, tools=tools, tool_choice=tool_choice)
         self.system_message = None
+        # Convert OpenAI format messages to Google format immediately
+        if messages:
+            self._restructure_from_openai_messages()
 
     @staticmethod
     def upgrade_to_google(obj: OpenAILLMContext) -> "GoogleLLMContext":
@@ -704,15 +707,30 @@ class GoogleLLMContext(OpenAILLMContext):
     def get_messages_for_logging(self):
         msgs = []
         for message in self.messages:
-            obj = glm.Content.to_dict(message)
             try:
+                # Check if message is already a Google Content object
+                if isinstance(message, glm.Content):
+                    obj = glm.Content.to_dict(message)
+                else:
+                    # If it's still in OpenAI format, convert it safely
+                    logger.warning(f"Message not yet converted to Google format: {type(message)}")
+                    if isinstance(message, dict):
+                        # Return a safe representation of the raw dict
+                        obj = {"role": message.get("role", "unknown"), "content": str(message.get("content", ""))[:100] + "..."}
+                    else:
+                        obj = {"role": "unknown", "content": str(message)[:100] + "..."}
+                
+                # Sanitize inline data for logging
                 if "parts" in obj:
                     for part in obj["parts"]:
                         if "inline_data" in part:
                             part["inline_data"]["data"] = "..."
+                            
+                msgs.append(obj)
             except Exception as e:
-                logger.debug(f"Error: {e}")
-            msgs.append(obj)
+                logger.debug(f"Error processing message for logging: {e}")
+                # Fallback to safe representation
+                msgs.append({"role": "error", "content": f"Error: {str(e)}"})
         return msgs
 
     def add_image_frame_message(
@@ -1166,8 +1184,8 @@ class GoogleLLMService(LLMService):
             # Store completion duration
             end_time = time.time()
             completion_duration = end_time - start_time
-            logger.debug(f"Completion duration: {completion_duration:.2f} seconds")
             self._completion_durations.append(completion_duration)
+            logger.debug(f"GoogleLLM completion duration: {completion_duration:.2f} seconds")
 
             if grounding_metadata is not None and isinstance(grounding_metadata, dict):
                 llm_search_frame = LLMSearchResponseFrame(
