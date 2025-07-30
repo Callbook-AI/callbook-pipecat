@@ -548,16 +548,39 @@ class GladiaSTTService(STTService):
         return True
     
     async def _on_final_transcript_message(self, transcript, language):
-        # Handle user speaking for final transcripts like Deepgram
-        await self._handle_user_speaking()
+        # Create the frame first
         frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
-
+        
+        # Handle first message tracking like Deepgram
         self._handle_first_message(frame.text)
-        self._append_accum_transcription(frame)
         self._was_first_transcript_receipt = True
-        # Send final transcriptions immediately, regardless of punctuation
-        # This matches Deepgram behavior and prevents delays
-        await self._send_accum_transcriptions()
+        
+        # For FastTextAggregator compatibility, we need to handle this exactly like Deepgram:
+        # 1. Ensure user speaking state is set properly
+        # 2. Send the transcription frame
+        # 3. Handle user silence to trigger processing
+        
+        # Ensure user is marked as speaking before sending transcription
+        if not self._user_speaking:
+            await self._handle_user_speaking()
+            # Small delay to ensure proper frame sequencing
+            await asyncio.sleep(0.001)
+        
+        # Send the transcription frame directly (like Deepgram does)
+        await self.push_frame(frame)
+        
+        # Mark that transcription was received
+        self._last_time_transcription = time.time()
+        
+        # Small delay before user silence to ensure proper frame ordering
+        await asyncio.sleep(0.001)
+        
+        # For final transcripts, we should trigger user silence to allow processing
+        # This matches Deepgram's behavior where final transcripts trigger processing
+        await self._handle_user_silence()
+        
+        # Stop processing metrics after handling the final transcript
+        await self.stop_processing_metrics()
     
     async def _on_interim_transcript_message(self, transcript, language):
         self._last_interim_time = time.time()
