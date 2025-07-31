@@ -291,6 +291,11 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
 
         self._aggregation_event = asyncio.Event()
         self._aggregation_task = None
+        
+        # Add buffering for STT services without interim results
+        self._transcript_buffer_timeout = 0.5  # 500ms buffer for Gladia-like services
+        self._last_transcript_time = 0
+        self._pending_transcripts = []
 
         self.reset()
 
@@ -355,6 +360,10 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         if not self._seen_interim_results:
             # Start the aggregation timer instead of immediately pushing
             self._aggregation_event.set()
+        else:
+            # For services with interim results (like Deepgram), we can push immediately
+            # when the user stops speaking since we've been aggregating interim results
+            self._aggregation_event.set()
 
     async def _handle_transcription(self, frame: TranscriptionFrame):
         text = frame.text
@@ -363,6 +372,8 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         if not text.strip():
             return
 
+        current_time = time.time()
+        
         # Add text to aggregation
         self._aggregation += f" {text}" if self._aggregation else text
         
@@ -370,9 +381,22 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         self._seen_interim_results = False
         
         # For STT services that don't provide interim results (like Gladia),
-        # we need to be more aggressive about timing to avoid multiple separate
-        # user messages for what should be a single utterance
-        self._aggregation_event.set()
+        # we need smarter timing logic to group related transcripts
+        if not self._seen_interim_results:
+            # If this is the first transcript in a while, or if enough time has passed
+            # since the last transcript, treat this as a new speech event
+            if (not self._last_transcript_time or 
+                current_time - self._last_transcript_time > self._transcript_buffer_timeout):
+                # This might be a new speech event, wait a bit to see if more transcripts come
+                self._last_transcript_time = current_time
+                # Don't immediately set aggregation event, let the timeout handle it
+            else:
+                # This transcript came soon after the previous one, likely part of same utterance
+                self._last_transcript_time = current_time
+                # Still don't immediately trigger - let the timeout accumulate them
+        else:
+            # For services with interim results, we can be more responsive
+            self._aggregation_event.set()
 
     async def _handle_interim_transcription(self, _: InterimTranscriptionFrame):
         self._seen_interim_results = True
@@ -391,6 +415,21 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
             try:
                 await asyncio.wait_for(self._aggregation_event.wait(), self._aggregation_timeout)
                 await self._maybe_push_bot_interruption()
+                
+                # For STT services without interim results, add additional buffering
+                if not self._seen_interim_results and self._aggregation:
+                    # Wait a bit more to see if additional transcripts arrive
+                    # that should be part of the same user message
+                    current_time = time.time()
+                    if (self._last_transcript_time and 
+                        current_time - self._last_transcript_time < self._transcript_buffer_timeout):
+                        # Recent transcript activity, wait a bit more
+                        await asyncio.sleep(self._transcript_buffer_timeout)
+                
+                # Now push the aggregation if we have content
+                if self._aggregation and not self._user_speaking:
+                    await self.push_aggregation()
+                    
             except asyncio.TimeoutError:
                 if not self._user_speaking:
                     await self.push_aggregation()
