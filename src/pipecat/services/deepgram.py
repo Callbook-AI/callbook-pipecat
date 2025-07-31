@@ -340,8 +340,12 @@ class DeepgramGladiaDetector:
         """Send audio chunk to Gladia for enhanced transcription."""
         try:
             if not self._websocket:
+                logger.warning("🎯 DeepgramGladiaDetector: WebSocket not available, skipping audio chunk")
                 return
                 
+            chunk_size = len(chunk)
+            logger.trace(f"🎯 DeepgramGladiaDetector: Sending audio chunk ({chunk_size} bytes)")
+            
             data = base64.b64encode(chunk).decode("utf-8")
             message = {"type": "audio_chunk", "data": {"chunk": data}}
             await self._websocket.send(json.dumps(message))
@@ -397,6 +401,7 @@ class DeepgramGladiaDetector:
                     content = json.loads(message)
                     
                     if content["type"] != "transcript":
+                        logger.trace(f"🎯 DeepgramGladiaDetector: Ignoring non-transcript message: {content['type']}")
                         continue
                         
                     utterance = content["data"]["utterance"]
@@ -404,8 +409,19 @@ class DeepgramGladiaDetector:
                     transcript = utterance["text"].strip()
                     is_final = content["data"]["is_final"]
                     
+                    logger.debug(f"🎯 DeepgramGladiaDetector: Raw message - Final: {is_final}, Text: '{transcript}', Confidence: {confidence:.2f}")
+                    
                     # Only process high-quality final transcripts
-                    if not is_final or not transcript or confidence < self._confidence:
+                    if not is_final:
+                        logger.trace(f"🎯 DeepgramGladiaDetector: Skipping interim result: '{transcript}'")
+                        continue
+                    
+                    if not transcript:
+                        logger.trace(f"🎯 DeepgramGladiaDetector: Skipping empty transcript")
+                        continue
+                        
+                    if confidence < self._confidence:
+                        logger.debug(f"🎯 DeepgramGladiaDetector: Skipping low confidence transcript: '{transcript}' (conf: {confidence:.2f} < {self._confidence})")
                         continue
                     
                     # Enhanced deduplication
@@ -413,20 +429,23 @@ class DeepgramGladiaDetector:
                     transcript_key = f"{transcript.lower()}_{confidence:.2f}"
                     
                     if transcript_key in self.processed_transcripts:
-                        logger.debug(f"🔄 DeepgramGladiaDetector: Duplicate ignored: {transcript}")
+                        logger.debug(f"🔄 DeepgramGladiaDetector: Duplicate ignored: '{transcript}' (key: {transcript_key})")
                         continue
                         
                     self.processed_transcripts.add(transcript_key)
+                    logger.debug(f"🎯 DeepgramGladiaDetector: Added to processed set: {transcript_key}")
                     
                     # Clean old entries to prevent memory growth
                     if len(self.processed_transcripts) > 100:
+                        logger.debug(f"🎯 DeepgramGladiaDetector: Cleaning processed transcripts cache (size: {len(self.processed_transcripts)})")
                         self.processed_transcripts.clear()
                     
                     self._last_transcript_time = current_time
                     
-                    logger.info(f"🎯 DeepgramGladiaDetector: Enhanced transcript: '{transcript}' (confidence: {confidence:.2f})")
+                    logger.info(f"🎯 DeepgramGladiaDetector: ✅ Enhanced transcript ACCEPTED: '{transcript}' (confidence: {confidence:.2f})")
                     
                     # Call the callback with enhanced transcript
+                    logger.debug(f"🎯 DeepgramGladiaDetector: Calling callback for: '{transcript}'")
                     await self._callback(transcript, confidence, current_time)
                     
                 except json.JSONDecodeError as e:
@@ -543,15 +562,17 @@ class DeepgramSTTService(STTService):
         self._complementary_gladia = None
 
         if not self._gladia_api_key:
-            logger.debug("🔧 DeepgramGladiaDetector: No Gladia API key provided, using Deepgram only")
+            logger.info("🔧 DeepgramSTTService: No Gladia API key provided, using Deepgram only")
             return
 
         # Only activate for languages that benefit from Gladia's enhanced accuracy
         enhanced_languages = ['es', 'en', 'fr', 'pt', 'ca']
         current_lang = self.language.lower() if isinstance(self.language, str) else str(self.language).lower()
         
+        logger.debug(f"🔧 DeepgramSTTService: Checking language '{current_lang}' for Gladia enhancement")
+        
         if not any(lang in current_lang for lang in enhanced_languages):
-            logger.debug(f"🔧 DeepgramGladiaDetector: Language '{current_lang}' doesn't need enhancement")
+            logger.info(f"🔧 DeepgramSTTService: Language '{current_lang}' doesn't benefit from Gladia enhancement")
             return
 
         try:
@@ -566,6 +587,8 @@ class DeepgramSTTService(STTService):
             else:
                 gladia_language = self.language
 
+            logger.info(f"🔧 DeepgramSTTService: Setting up Gladia enhancement for {gladia_language}")
+
             self._complementary_gladia = DeepgramGladiaDetector(
                 api_key=self._gladia_api_key,
                 callback=self.gladia_transcript_handler,
@@ -577,16 +600,16 @@ class DeepgramSTTService(STTService):
                 timeout_seconds=self._gladia_timeout
             )
             
-            logger.info(f"🎯 DeepgramGladiaDetector: Enhanced transcription enabled for {gladia_language}")
+            logger.info(f"🎯 DeepgramSTTService: ✅ Enhanced transcription enabled for {gladia_language} (timeout: {self._gladia_timeout}s)")
             
         except Exception as e:
-            logger.exception(f"❌ DeepgramGladiaDetector setup failed: {e}")
+            logger.exception(f"❌ DeepgramSTTService: Gladia setup failed: {e}")
             self._complementary_gladia = None
 
     async def gladia_transcript_handler(self, transcript: str, confidence: float, timestamp: float):
         """Handle enhanced transcription from Gladia."""
         try:
-            logger.debug(f"🎯 DeepgramGladiaDetector received: '{transcript}' (confidence: {confidence:.2f})")
+            logger.info(f"🎯 DeepgramSTTService: ⬇️ Gladia callback received: '{transcript}' (confidence: {confidence:.2f}, timestamp: {timestamp})")
             
             # Create a mock Deepgram result for compatibility
             mock_result = type('MockResult', (), {
@@ -603,16 +626,22 @@ class DeepgramSTTService(STTService):
                 })()
             })()
             
+            logger.debug(f"🎯 DeepgramSTTService: Created mock Deepgram result for Gladia transcript")
+            
             # Process through existing Deepgram logic but mark as enhanced
+            logger.debug(f"🎯 DeepgramSTTService: Setting ignore_deepgram_finals=True")
             self._ignore_deepgram_finals = True
+            
+            logger.debug(f"🎯 DeepgramSTTService: Calling _on_message with enhanced=True")
             await self._on_message(result=mock_result, enhanced=True)
             
             # Reset flag after processing
             await asyncio.sleep(0.1)
+            logger.debug(f"🎯 DeepgramSTTService: Resetting ignore_deepgram_finals=False")
             self._ignore_deepgram_finals = False
             
         except Exception as e:
-            logger.exception(f"❌ DeepgramGladiaDetector handler error: {e}")
+            logger.exception(f"❌ DeepgramSTTService: Gladia handler error: {e}")
 
     @property
     def vad_enabled(self):
@@ -719,10 +748,12 @@ class DeepgramSTTService(STTService):
 
             if self._sibling_deepgram:
                 await self._sibling_deepgram.start()
+                logger.debug("🔧 DeepgramSTTService: Sibling Deepgram started")
                 
             if self._complementary_gladia:
+                logger.info("🎯 DeepgramSTTService: Starting enhanced Gladia transcription...")
                 await self._complementary_gladia.start()
-                logger.info("🎯 DeepgramGladiaDetector: Enhanced transcription started")
+                logger.info("🎯 DeepgramSTTService: ✅ Enhanced transcription started and ready")
         except Exception as e:
             logger.exception(f"{self} exception in start: {e}")
             raise       
@@ -734,10 +765,12 @@ class DeepgramSTTService(STTService):
 
             if self._sibling_deepgram:
                 await self._sibling_deepgram.stop()
+                logger.debug("🔧 DeepgramSTTService: Sibling Deepgram stopped")
                 
             if self._complementary_gladia:
+                logger.info("🎯 DeepgramSTTService: Stopping enhanced Gladia transcription...")
                 await self._complementary_gladia.stop()
-                logger.info("🎯 DeepgramGladiaDetector: Enhanced transcription stopped")
+                logger.info("🎯 DeepgramSTTService: ✅ Enhanced transcription stopped")
                 
         except Exception as e:
             logger.exception(f"{self} exception in stop: {e}")
@@ -762,13 +795,21 @@ class DeepgramSTTService(STTService):
             # Start timing when we receive first audio after speech detection
             if self._current_speech_start_time is None:
                 self._current_speech_start_time = current_time
-                logger.debug(f"🎤 Deepgram: Starting speech detection timer at chunk #{self._audio_chunk_count}")
+                logger.debug(f"🎤 DeepgramSTTService: ⏱️ Starting speech detection timer at chunk #{self._audio_chunk_count}")
             
+            # Send audio to primary Deepgram service
+            logger.trace(f"⚡ DeepgramSTTService: Sending audio chunk #{self._audio_chunk_count} to Deepgram ({len(audio)} bytes)")
             await self._connection.send(audio)
+            
+            # Send to sibling services if available
             if self._sibling_deepgram:
+                logger.trace(f"🔧 DeepgramSTTService: Sending audio to sibling Deepgram")
                 await self._sibling_deepgram.send_audio(audio)
+                
             if self._complementary_gladia:
+                logger.trace(f"🎯 DeepgramSTTService: Sending audio to complementary Gladia")
                 await self._complementary_gladia.send_audio(audio)
+                
             yield None
         except Exception as e:
             logger.exception(f"{self} exception in run_stt: {e}")
@@ -1054,11 +1095,17 @@ class DeepgramSTTService(STTService):
             start_time = result.start
             
             # Enhanced logging for debugging
-            source = "🎯 Gladia Enhanced" if enhanced else "⚡ Deepgram"
-            logger.debug(f"{source}: {'Final' if is_final else 'Interim'} - '{transcript}' (conf: {confidence:.2f})")
+            source = "🎯 Gladia Enhanced" if enhanced else "⚡ Deepgram Standard"
+            transcript_type = "FINAL" if is_final else "INTERIM"
+            logger.info(f"{source}: 📋 {transcript_type} transcript received")
+            logger.info(f"   📝 Text: '{transcript}'")
+            logger.info(f"   🎯 Confidence: {confidence:.2f}")
+            logger.info(f"   ⏰ Start time: {start_time}")
+            logger.info(f"   🗣️ Speech final: {speech_final}")
             
             # Skip Deepgram finals if we're expecting enhanced results
             if is_final and not enhanced and self._complementary_gladia and not self._ignore_deepgram_finals:
+                logger.debug(f"⚡ DeepgramSTTService: Storing Deepgram final and waiting for Gladia enhancement...")
                 # Store Deepgram final and wait briefly for Gladia
                 transcript_key = f"{transcript.lower()}_{start_time}"
                 self._pending_deepgram_finals[transcript_key] = {
@@ -1066,11 +1113,14 @@ class DeepgramSTTService(STTService):
                     'timestamp': time.time()
                 }
                 
+                logger.debug(f"⚡ DeepgramSTTService: Stored pending final with key: {transcript_key}")
+                logger.debug(f"⏰ DeepgramSTTService: Setting {self._gladia_timeout}s timeout for Gladia response")
+                
                 # Set timeout to process Deepgram if Gladia doesn't respond
                 async def timeout_handler():
                     await asyncio.sleep(self._gladia_timeout)
                     if transcript_key in self._pending_deepgram_finals:
-                        logger.debug(f"⏰ Timeout: Using Deepgram final for '{transcript}'")
+                        logger.warning(f"⏰ DeepgramSTTService: TIMEOUT - No Gladia response, using Deepgram final: '{transcript}'")
                         pending = self._pending_deepgram_finals.pop(transcript_key)
                         await self._process_final_transcript(pending['result'], enhanced=False)
                 
@@ -1079,9 +1129,10 @@ class DeepgramSTTService(STTService):
             
             # Skip Deepgram finals when enhanced version is being processed
             if is_final and not enhanced and self._ignore_deepgram_finals:
-                logger.debug(f"🚫 Skipping Deepgram final (enhanced version processing): '{transcript}'")
+                logger.info(f"🚫 DeepgramSTTService: Skipping Deepgram final (Gladia processing): '{transcript}'")
                 return
             
+            logger.debug(f"✅ DeepgramSTTService: Processing transcript from {source}")
             await self._process_transcript_message(result, enhanced)
                 
         except Exception as e:
@@ -1100,21 +1151,28 @@ class DeepgramSTTService(STTService):
             language = Language(language)
         
         if len(transcript) > 0:
+            source_detailed = "🎯 Enhanced Gladia" if enhanced else "⚡ Standard Deepgram"
+            logger.debug(f"📏 DeepgramSTTService: Non-empty transcript received from {source_detailed}")
             await self.stop_ttfb_metrics()
 
             if await self._detect_and_handle_voicemail(transcript):
+                logger.info(f"📞 DeepgramSTTService: Voicemail detected and handled")
                 return 
             
-            source = "🎯 Enhanced" if enhanced else "⚡ Standard"
-            logger.debug(f"{source} Transcription{'' if is_final else ' interim'}: {transcript}")
-            logger.debug(f"Confidence: {confidence}")
+            transcript_status = "FINAL" if is_final else "INTERIM"
+            logger.debug(f"{source_detailed}: Processing {transcript_status} - '{transcript}'")
+            logger.debug(f"   🎯 Confidence: {confidence:.2f}")
+            logger.debug(f"   ⏰ Start time: {start_time}")
             
             if await self._should_ignore_transcription(result):
+                logger.debug(f"🚫 DeepgramSTTService: Transcript ignored by filter")
                 return
             
             if is_final:
+                logger.info(f"🎯 DeepgramSTTService: Processing FINAL transcript from {source_detailed}")
                 await self._process_final_transcript(result, enhanced)
             else:
+                logger.debug(f"📢 DeepgramSTTService: Processing INTERIM transcript from {source_detailed}")
                 await self._on_interim_transcript_message(transcript, language, start_time)
 
     async def _process_final_transcript(self, result, enhanced=False):
@@ -1135,51 +1193,59 @@ class DeepgramSTTService(STTService):
             elapsed_formatted = round(elapsed, 3)
             self._stt_response_times.append(elapsed_formatted)
             
-            source = "🎯 Enhanced Gladia" if enhanced else "⚡ Standard Deepgram"
-            logger.debug(f"📊 {source} STT Response Time: {elapsed_formatted}s")
-            logger.debug(f"   📝 Transcript: '{transcript}'")
-            logger.debug(f"   🎯 Confidence: {confidence:.2f}")
-            logger.debug(f"   📦 Audio chunks processed: {self._audio_chunk_count}")
+            source_name = "🎯 Enhanced Gladia" if enhanced else "⚡ Standard Deepgram"
+            logger.info(f"📊 {source_name}: ⏱️ STT Response Time: {elapsed_formatted}s")
+            logger.info(f"   📝 Final Transcript: '{transcript}'")
+            logger.info(f"   🎯 Confidence: {confidence:.2f}")
+            logger.info(f"   📦 Audio chunks processed: {self._audio_chunk_count}")
+            logger.info(f"   🗣️ Speech final: {speech_final}")
             
             self._current_speech_start_time = None
             self._audio_chunk_count = 0
+            logger.debug(f"🔄 DeepgramSTTService: Reset speech timing counters")
         
+        logger.debug(f"🎯 DeepgramSTTService: Calling _on_final_transcript_message for: '{transcript}'")
         await self._on_final_transcript_message(transcript, language, speech_final)
         self._last_time_transcription = start_time
+        logger.debug(f"⏰ DeepgramSTTService: Updated last transcription time to {start_time}")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, BotStartedSpeakingFrame):
-            logger.debug("Received bot started speaking on deepgram")
+            logger.debug("🤖 DeepgramSTTService: Received bot started speaking")
             await self._handle_bot_speaking()
 
         if isinstance(frame, BotStoppedSpeakingFrame):
-            logger.debug("Received bot stopped speaking on deepgram")
+            logger.debug("🤖 DeepgramSTTService: Received bot stopped speaking")
             await self._handle_bot_silence() 
 
         if isinstance(frame, STTRestartFrame):
-            logger.debug("Received STT Restart Frame")
+            logger.info("🔄 DeepgramSTTService: Received STT Restart Frame - restarting services")
             self._restarted = True
             await self._disconnect()
             await self._connect()
             return
 
         if isinstance(frame, UserStartedSpeakingFrame) and not self.vad_enabled:
+            logger.info("🎤 DeepgramSTTService: User started speaking (VAD disabled)")
             # Start metrics if Deepgram VAD is disabled & pipeline VAD has detected speech
             await self.start_metrics()
             # Reset timing when user starts speaking
             self._current_speech_start_time = time.perf_counter()
             self._audio_chunk_count = 0
-            logger.debug(f"🎤 Deepgram: User started speaking - resetting timer")
+            logger.debug(f"⏱️ DeepgramSTTService: Speech timer reset - waiting for transcriptions")
         elif isinstance(frame, UserStoppedSpeakingFrame):
+            logger.debug("🎤 DeepgramSTTService: User stopped speaking - finalizing connection")
             # https://developers.deepgram.com/docs/finalize
             await self._connection.finalize()
             logger.trace(f"Triggered finalize event on: {frame.name}, {direction}")
         
         if isinstance(frame, VADInactiveFrame):
+            logger.debug("🎤 DeepgramSTTService: VAD inactive")
             self._vad_active = False
             if self._connection and self._connection.is_connected:
                 await self._connection.finalize()  
         elif isinstance(frame, VADActiveFrame):
+            logger.debug("🎤 DeepgramSTTService: VAD active")
             self._vad_active = True
