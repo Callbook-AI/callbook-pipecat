@@ -4,13 +4,17 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import base64
+import json
 import re
 import time
 import asyncio
 from typing import AsyncGenerator, Dict, List, Optional, Callable
 
 
+import aiohttp
 from loguru import logger
+import websockets
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
@@ -236,6 +240,205 @@ class DeepgramSiDetector:
         except Exception as e:
             logger.exception(f"{self} exception in DeepgramSiDetector._on_transcript_event: {e}")
 
+def language_to_gladia_language(language: Language) -> str:
+    """Convert Pipecat Language to Gladia language code."""
+    lang_map = {
+        Language.ES: "es",
+        Language.EN: "en", 
+        Language.FR: "fr",
+        Language.DE: "de",
+        Language.IT: "it",
+        Language.PT: "pt",
+        Language.CA: "ca",
+    }
+    if isinstance(language, Language):
+        return lang_map.get(language, "es")
+    elif isinstance(language, str):
+        return language if language in lang_map.values() else "es"
+    return "es"
+
+class DeepgramGladiaDetector:
+    """
+    High-quality STT enhancement using Gladia's Solaria-1 model.
+    Runs parallel to Deepgram, providing superior final transcriptions
+    while maintaining Deepgram's speed for interim results.
+    """
+    def __init__(
+        self,
+        api_key: str,
+        callback: Callable[[str, float, float], None],  # transcript, confidence, timestamp
+        language: Language = Language.ES,
+        url: str = "https://api.gladia.io/v2/live",
+        sample_rate: int = 16_000,
+        confidence: float = 0.6,
+        endpointing: float = 0.4,
+        speech_threshold: float = 0.6,
+        timeout_seconds: float = 1.5,  # Timeout to fallback to Deepgram
+    ):
+        self._api_key = api_key
+        self._callback = callback
+        self._language = language
+        self._url = url
+        self._sample_rate = sample_rate
+        self._confidence = confidence
+        self._timeout_seconds = timeout_seconds
+        
+        # WebSocket connection
+        self._websocket = None
+        self._receive_task = None
+        
+        # Timing and deduplication
+        self.processed_transcripts = set()
+        self._last_transcript_time = 0
+        self._start_time = time.time()
+        
+        # Gladia configuration optimized for Spanish accuracy
+        self._settings = {
+            "encoding": "wav/pcm",
+            "bit_depth": 16,
+            "sample_rate": sample_rate,
+            "channels": 1,
+            "model": "solaria-1",  # Best model for Spanish
+            "endpointing": endpointing,
+            "maximum_duration_without_endpointing": 6,
+            "language_config": {
+                "languages": [language_to_gladia_language(language)],
+                "code_switching": False,
+            },
+            "pre_processing": {
+                "audio_enhancer": False,  # Faster processing
+                "speech_threshold": speech_threshold,
+            },
+            "realtime_processing": {
+                "words_accurate_timestamps": False,
+            },
+            "messages_config": {
+                "receive_final_transcripts": True,
+                "receive_speech_events": False,
+                "receive_pre_processing_events": False,
+                "receive_realtime_processing_events": False,
+                "receive_post_processing_events": False,
+                "receive_acknowledgments": False,
+                "receive_errors": True,
+                "receive_lifecycle_events": False
+            }
+        }
+
+    async def start(self):
+        """Initialize Gladia connection for high-quality transcription."""
+        try:
+            logger.info("🎯 DeepgramGladiaDetector: Starting enhanced transcription service")
+            response = await self._setup_gladia()
+            self._websocket = await websockets.connect(response["url"])
+            self._receive_task = asyncio.create_task(self._receive_task_handler())
+            logger.info("✅ DeepgramGladiaDetector: Enhanced transcription ready")
+        except Exception as e:
+            logger.exception(f"❌ DeepgramGladiaDetector failed to start: {e}")
+            raise
+
+    async def send_audio(self, chunk: bytes):
+        """Send audio chunk to Gladia for enhanced transcription."""
+        try:
+            if not self._websocket:
+                return
+                
+            data = base64.b64encode(chunk).decode("utf-8")
+            message = {"type": "audio_chunk", "data": {"chunk": data}}
+            await self._websocket.send(json.dumps(message))
+            
+        except Exception as e:
+            logger.debug(f"🔧 DeepgramGladiaDetector audio send error: {e}")
+
+    async def stop(self):
+        """Gracefully stop the enhanced transcription service."""
+        try:
+            logger.info("🛑 DeepgramGladiaDetector: Stopping enhanced transcription")
+            
+            if self._receive_task:
+                self._receive_task.cancel()
+                try:
+                    await self._receive_task
+                except asyncio.CancelledError:
+                    pass
+            
+            if self._websocket:
+                await self._websocket.send(json.dumps({"type": "stop_recording"}))
+                await self._websocket.close()
+                
+            logger.info("✅ DeepgramGladiaDetector: Enhanced transcription stopped")
+            
+        except Exception as e:
+            logger.exception(f"❌ DeepgramGladiaDetector stop error: {e}")
+
+    async def _setup_gladia(self):
+        """Setup Gladia session for enhanced transcription."""
+        async with aiohttp.ClientSession() as session:
+            logger.debug("🔧 DeepgramGladiaDetector: Configuring enhanced transcription")
+            logger.debug(f"🎯 Gladia settings: {self._settings}")
+            
+            async with session.post(
+                self._url,
+                headers={"X-Gladia-Key": self._api_key, "Content-Type": "application/json"},
+                json=self._settings,
+            ) as response:
+                if response.ok:
+                    return await response.json()
+                else:
+                    error_text = await response.text()
+                    raise Exception(f"Gladia session failed: {response.status} - {error_text}")
+
+    async def _receive_task_handler(self):
+        """Handle enhanced transcription results from Gladia."""
+        try:
+            logger.debug("📡 DeepgramGladiaDetector: Listening for enhanced transcriptions")
+            
+            async for message in self._websocket:
+                try:
+                    content = json.loads(message)
+                    
+                    if content["type"] != "transcript":
+                        continue
+                        
+                    utterance = content["data"]["utterance"]
+                    confidence = utterance.get("confidence", 0)
+                    transcript = utterance["text"].strip()
+                    is_final = content["data"]["is_final"]
+                    
+                    # Only process high-quality final transcripts
+                    if not is_final or not transcript or confidence < self._confidence:
+                        continue
+                    
+                    # Enhanced deduplication
+                    current_time = time.time()
+                    transcript_key = f"{transcript.lower()}_{confidence:.2f}"
+                    
+                    if transcript_key in self.processed_transcripts:
+                        logger.debug(f"🔄 DeepgramGladiaDetector: Duplicate ignored: {transcript}")
+                        continue
+                        
+                    self.processed_transcripts.add(transcript_key)
+                    
+                    # Clean old entries to prevent memory growth
+                    if len(self.processed_transcripts) > 100:
+                        self.processed_transcripts.clear()
+                    
+                    self._last_transcript_time = current_time
+                    
+                    logger.info(f"🎯 DeepgramGladiaDetector: Enhanced transcript: '{transcript}' (confidence: {confidence:.2f})")
+                    
+                    # Call the callback with enhanced transcript
+                    await self._callback(transcript, confidence, current_time)
+                    
+                except json.JSONDecodeError as e:
+                    logger.warning(f"⚠️ DeepgramGladiaDetector: Invalid JSON: {e}")
+                except Exception as e:
+                    logger.exception(f"❌ DeepgramGladiaDetector message error: {e}")
+                    
+        except websockets.exceptions.ConnectionClosed:
+            logger.info("🔌 DeepgramGladiaDetector: Connection closed")
+        except Exception as e:
+            logger.exception(f"❌ DeepgramGladiaDetector receive error: {e}")
+
 
 class DeepgramSTTService(STTService):
     def __init__(
@@ -249,6 +452,8 @@ class DeepgramSTTService(STTService):
         addons: Optional[Dict] = None,
         detect_voicemail: bool = True,  
         allow_interruptions: bool = True,
+        gladia_api_key: Optional[str] = None,  # NEW: Gladia API key for enhanced accuracy
+        gladia_timeout: float = 1.5,
         **kwargs,
     ):
         sample_rate = sample_rate or (live_options.sample_rate if live_options else None)
@@ -325,6 +530,89 @@ class DeepgramSTTService(STTService):
         self._last_audio_chunk_time = None  # Track last audio chunk received
         self._audio_chunk_count = 0  # Count audio chunks for debugging
 
+
+        self._gladia_api_key = gladia_api_key
+        self._gladia_timeout = gladia_timeout
+        self._pending_deepgram_finals = {}  # Store Deepgram finals waiting for Gladia
+        self._ignore_deepgram_finals = False  # Flag to ignore Deepgram when Gladia is used
+        
+        self._setup_complementary_gladia()
+
+    def _setup_complementary_gladia(self):
+        """Setup Gladia service for enhanced Spanish transcription accuracy."""
+        self._complementary_gladia = None
+
+        if not self._gladia_api_key:
+            logger.debug("🔧 DeepgramGladiaDetector: No Gladia API key provided, using Deepgram only")
+            return
+
+        # Only activate for languages that benefit from Gladia's enhanced accuracy
+        enhanced_languages = ['es', 'en', 'fr', 'pt', 'ca']
+        current_lang = self.language.lower() if isinstance(self.language, str) else str(self.language).lower()
+        
+        if not any(lang in current_lang for lang in enhanced_languages):
+            logger.debug(f"🔧 DeepgramGladiaDetector: Language '{current_lang}' doesn't need enhancement")
+            return
+
+        try:
+            # Convert language for Gladia
+            if isinstance(self.language, str):
+                if self.language.lower() == 'es':
+                    gladia_language = Language.ES
+                elif self.language.lower() == 'en':
+                    gladia_language = Language.EN
+                else:
+                    gladia_language = Language.ES  # Default fallback
+            else:
+                gladia_language = self.language
+
+            self._complementary_gladia = DeepgramGladiaDetector(
+                api_key=self._gladia_api_key,
+                callback=self.gladia_transcript_handler,
+                language=gladia_language,
+                sample_rate=self.sample_rate or 16000,
+                confidence=0.6,
+                endpointing=0.4,
+                speech_threshold=0.6,
+                timeout_seconds=self._gladia_timeout
+            )
+            
+            logger.info(f"🎯 DeepgramGladiaDetector: Enhanced transcription enabled for {gladia_language}")
+            
+        except Exception as e:
+            logger.exception(f"❌ DeepgramGladiaDetector setup failed: {e}")
+            self._complementary_gladia = None
+
+    async def gladia_transcript_handler(self, transcript: str, confidence: float, timestamp: float):
+        """Handle enhanced transcription from Gladia."""
+        try:
+            logger.debug(f"🎯 DeepgramGladiaDetector received: '{transcript}' (confidence: {confidence:.2f})")
+            
+            # Create a mock Deepgram result for compatibility
+            mock_result = type('MockResult', (), {
+                'is_final': True,
+                'speech_final': True,
+                'start': timestamp,
+                'channel': type('Channel', (), {
+                    'alternatives': [type('Alternative', (), {
+                        'transcript': transcript,
+                        'confidence': confidence,
+                        'words': [],
+                        'languages': [str(self.language)] if hasattr(self, 'language') else ['es']
+                    })()]
+                })()
+            })()
+            
+            # Process through existing Deepgram logic but mark as enhanced
+            self._ignore_deepgram_finals = True
+            await self._on_message(result=mock_result, enhanced=True)
+            
+            # Reset flag after processing
+            await asyncio.sleep(0.1)
+            self._ignore_deepgram_finals = False
+            
+        except Exception as e:
+            logger.exception(f"❌ DeepgramGladiaDetector handler error: {e}")
 
     @property
     def vad_enabled(self):
@@ -431,18 +719,26 @@ class DeepgramSTTService(STTService):
 
             if self._sibling_deepgram:
                 await self._sibling_deepgram.start()
+                
+            if self._complementary_gladia:
+                await self._complementary_gladia.start()
+                logger.info("🎯 DeepgramGladiaDetector: Enhanced transcription started")
         except Exception as e:
             logger.exception(f"{self} exception in start: {e}")
-            raise
+            raise       
 
     async def stop(self, frame: EndFrame):
-
         try:
             await super().stop(frame)
             await self._disconnect()
 
             if self._sibling_deepgram:
                 await self._sibling_deepgram.stop()
+                
+            if self._complementary_gladia:
+                await self._complementary_gladia.stop()
+                logger.info("🎯 DeepgramGladiaDetector: Enhanced transcription stopped")
+                
         except Exception as e:
             logger.exception(f"{self} exception in stop: {e}")
             raise
@@ -471,10 +767,13 @@ class DeepgramSTTService(STTService):
             await self._connection.send(audio)
             if self._sibling_deepgram:
                 await self._sibling_deepgram.send_audio(audio)
+            if self._complementary_gladia:
+                await self._complementary_gladia.send_audio(audio)
             yield None
         except Exception as e:
             logger.exception(f"{self} exception in run_stt: {e}")
             yield ErrorFrame(f"run_stt error: {e}")
+
 
     async def _connect(self):
         try:
@@ -737,11 +1036,13 @@ class DeepgramSTTService(STTService):
 
 
     async def _on_message(self, *args, **kwargs):
-        if not self._restarted: return
+        if not self._restarted: 
+            return
+            
+        enhanced = kwargs.pop('enhanced', False)
+        
         try:
             result: LiveResultResponse = kwargs["result"]
-            
-            logger.debug(result)
             
             if len(result.channel.alternatives) == 0:
                 return
@@ -752,49 +1053,99 @@ class DeepgramSTTService(STTService):
             confidence = result.channel.alternatives[0].confidence
             start_time = result.start
             
-            language = None
-            if result.channel.alternatives[0].languages:
-                language = result.channel.alternatives[0].languages[0]
-                language = Language(language)
+            # Enhanced logging for debugging
+            source = "🎯 Gladia Enhanced" if enhanced else "⚡ Deepgram"
+            logger.debug(f"{source}: {'Final' if is_final else 'Interim'} - '{transcript}' (conf: {confidence:.2f})")
             
-            if len(transcript) > 0:
-                await self.stop_ttfb_metrics()
-
-                if await self._detect_and_handle_voicemail(transcript):
-                    return 
+            # Skip Deepgram finals if we're expecting enhanced results
+            if is_final and not enhanced and self._complementary_gladia and not self._ignore_deepgram_finals:
+                # Store Deepgram final and wait briefly for Gladia
+                transcript_key = f"{transcript.lower()}_{start_time}"
+                self._pending_deepgram_finals[transcript_key] = {
+                    'result': result,
+                    'timestamp': time.time()
+                }
                 
-                logger.debug(f"Transcription{'' if is_final else ' interim'}: {transcript}")
-                logger.debug(f"Confidence: {confidence}")
+                # Set timeout to process Deepgram if Gladia doesn't respond
+                async def timeout_handler():
+                    await asyncio.sleep(self._gladia_timeout)
+                    if transcript_key in self._pending_deepgram_finals:
+                        logger.debug(f"⏰ Timeout: Using Deepgram final for '{transcript}'")
+                        pending = self._pending_deepgram_finals.pop(transcript_key)
+                        await self._process_final_transcript(pending['result'], enhanced=False)
                 
-                if await self._should_ignore_transcription(result):
-                    return
+                asyncio.create_task(timeout_handler())
+                return
+            
+            # Skip Deepgram finals when enhanced version is being processed
+            if is_final and not enhanced and self._ignore_deepgram_finals:
+                logger.debug(f"🚫 Skipping Deepgram final (enhanced version processing): '{transcript}'")
+                return
+            
+            await self._process_transcript_message(result, enhanced)
                 
-                if is_final:
-                    # Enhanced response time measurement for final transcripts
-                    if self._current_speech_start_time is not None:
-                        elapsed = time.perf_counter() - self._current_speech_start_time
-                        elapsed_formatted = round(elapsed, 3)
-                        self._stt_response_times.append(elapsed_formatted)
-                        
-                        # Log detailed timing information
-                        logger.debug(f"📊 Deepgram STT Response Time: {elapsed_formatted}s")
-                        logger.debug(f"   📝 Transcript: '{transcript}'")
-                        logger.debug(f"   🎯 Confidence: {confidence:.2f}")
-                        logger.debug(f"   📦 Audio chunks processed: {self._audio_chunk_count}")
-                        
-                        # Reset timing for next speech segment
-                        self._current_speech_start_time = None
-                        self._audio_chunk_count = 0
-                    
-                    await self._on_final_transcript_message(transcript, language, speech_final)
-                    self._last_time_transcription = start_time
-                else:
-                    await self._on_interim_transcript_message(transcript, language, start_time)
-
         except Exception as e:
-            # full traceback will be logged
             logger.exception(f"{self} unexpected error in _on_message: {e}")
 
+    async def _process_transcript_message(self, result, enhanced=False):
+        """Process transcript message with enhanced source tracking."""
+        is_final = result.is_final
+        transcript = result.channel.alternatives[0].transcript
+        confidence = result.channel.alternatives[0].confidence
+        start_time = result.start
+        
+        language = None
+        if result.channel.alternatives[0].languages:
+            language = result.channel.alternatives[0].languages[0]
+            language = Language(language)
+        
+        if len(transcript) > 0:
+            await self.stop_ttfb_metrics()
+
+            if await self._detect_and_handle_voicemail(transcript):
+                return 
+            
+            source = "🎯 Enhanced" if enhanced else "⚡ Standard"
+            logger.debug(f"{source} Transcription{'' if is_final else ' interim'}: {transcript}")
+            logger.debug(f"Confidence: {confidence}")
+            
+            if await self._should_ignore_transcription(result):
+                return
+            
+            if is_final:
+                await self._process_final_transcript(result, enhanced)
+            else:
+                await self._on_interim_transcript_message(transcript, language, start_time)
+
+    async def _process_final_transcript(self, result, enhanced=False):
+        """Process final transcript with enhanced source tracking."""
+        transcript = result.channel.alternatives[0].transcript
+        confidence = result.channel.alternatives[0].confidence
+        start_time = result.start
+        speech_final = getattr(result, 'speech_final', True)
+        
+        language = None
+        if result.channel.alternatives[0].languages:
+            language = result.channel.alternatives[0].languages[0]
+            language = Language(language)
+        
+        # Enhanced response time measurement
+        if self._current_speech_start_time is not None:
+            elapsed = time.perf_counter() - self._current_speech_start_time
+            elapsed_formatted = round(elapsed, 3)
+            self._stt_response_times.append(elapsed_formatted)
+            
+            source = "🎯 Enhanced Gladia" if enhanced else "⚡ Standard Deepgram"
+            logger.debug(f"📊 {source} STT Response Time: {elapsed_formatted}s")
+            logger.debug(f"   📝 Transcript: '{transcript}'")
+            logger.debug(f"   🎯 Confidence: {confidence:.2f}")
+            logger.debug(f"   📦 Audio chunks processed: {self._audio_chunk_count}")
+            
+            self._current_speech_start_time = None
+            self._audio_chunk_count = 0
+        
+        await self._on_final_transcript_message(transcript, language, speech_final)
+        self._last_time_transcription = start_time
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
