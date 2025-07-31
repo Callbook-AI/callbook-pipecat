@@ -86,6 +86,25 @@ class OpenAILLMContext:
         return self._tool_choice
 
     def add_message(self, message: ChatCompletionMessageParam):
+        # Smart message merging: if the last message has the same role,
+        # merge the content instead of creating separate messages
+        if (self._messages and 
+            self._messages[-1].get("role") == message.get("role") and
+            message.get("role") in ["user", "assistant"]):
+            
+            # Merge content for consecutive messages with same role
+            last_content = self._messages[-1].get("content", "")
+            new_content = message.get("content", "")
+            
+            # Only merge if both are strings (not complex content)
+            if isinstance(last_content, str) and isinstance(new_content, str):
+                # Merge with proper spacing
+                merged_content = f"{last_content.strip()} {new_content.strip()}".strip()
+                self._messages[-1]["content"] = merged_content
+                logger.debug(f"Merged consecutive {message.get('role')} messages: '{merged_content}'")
+                return
+        
+        # Otherwise, append as normal
         self._messages.append(message)
 
     def add_messages(self, messages: List[ChatCompletionMessageParam]):

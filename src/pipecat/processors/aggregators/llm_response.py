@@ -349,8 +349,12 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
     async def _handle_user_stopped_speaking(self, _: UserStoppedSpeakingFrame):
         self._last_user_speaking_time = time.time()
         self._user_speaking = False
+        # For STT services without interim results (like Gladia), we should wait
+        # a bit before pushing aggregation to allow multiple final transcripts
+        # to be combined into a single user message
         if not self._seen_interim_results:
-            await self.push_aggregation()
+            # Start the aggregation timer instead of immediately pushing
+            self._aggregation_event.set()
 
     async def _handle_transcription(self, frame: TranscriptionFrame):
         text = frame.text
@@ -359,10 +363,15 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         if not text.strip():
             return
 
+        # Add text to aggregation
         self._aggregation += f" {text}" if self._aggregation else text
+        
         # We just got a final result, so let's reset interim results.
         self._seen_interim_results = False
-        # Reset aggregation timer.
+        
+        # For STT services that don't provide interim results (like Gladia),
+        # we need to be more aggressive about timing to avoid multiple separate
+        # user messages for what should be a single utterance
         self._aggregation_event.set()
 
     async def _handle_interim_transcription(self, _: InterimTranscriptionFrame):
