@@ -256,6 +256,8 @@ class DeepgramGladiaDetector:
         url: str = "https://api.gladia.io/v2/live",
         sample_rate: int = 16_000,
         timeout_seconds: float = 2.0,  # Timeout for Gladia response
+        confidence: float = 0.6,  # Confidence threshold matching GladiaSTTService
+        on_no_punctuation_seconds: float = 0.8,  # Faster timeout for better coordination with VAD
     ):
         self._api_key = api_key
         self._callback = callback
@@ -263,6 +265,8 @@ class DeepgramGladiaDetector:
         self._url = url
         self._sample_rate = sample_rate
         self._timeout_seconds = timeout_seconds
+        self._confidence = confidence
+        self._on_no_punctuation_seconds = on_no_punctuation_seconds
         
         # WebSocket connection
         self._websocket = None
@@ -274,25 +278,38 @@ class DeepgramGladiaDetector:
         self._last_transcript_time = None
         self._pending_finals = {}  # Track pending final transcripts
         
-        # Gladia configuration optimized for Spanish
+        # State tracking (matching GladiaSTTService)
+        self._user_speaking = False
+        self._bot_speaking = True
+        self._vad_active = False
+        self._restarted = False
+        
+        # Performance tracking
+        self.start_time = time.time()
+        self._stt_response_times = []
+        self._current_speech_start_time = None
+        self._last_audio_chunk_time = None
+        self._audio_chunk_count = 0
+        
+        # Gladia configuration matching GladiaSTTService settings
         self._settings = {
             "encoding": "wav/pcm",
             "bit_depth": 16,
             "sample_rate": sample_rate,
             "channels": 1,
             "model": "solaria-1",  # Best Spanish model
-            "endpointing": 0.3,  # Faster endpointing for Spanish
-            "maximum_duration_without_endpointing": 4,
+            "endpointing": 0.4,  # Balanced endpointing for natural conversation
+            "maximum_duration_without_endpointing": 6,
             "language_config": {
                 "languages": [self._language_to_gladia_code(language)],
                 "code_switching": False,
             },
             "pre_processing": {
-                "audio_enhancer": True,  # Enhanced for better Spanish accuracy
-                "speech_threshold": 0.5,
+                "audio_enhancer": False,  # Keep audio enhancement disabled for consistency
+                "speech_threshold": 0.6,  # Lowered to catch more speech while filtering noise
             },
             "realtime_processing": {
-                "words_accurate_timestamps": True,
+                "words_accurate_timestamps": False,  # Disabled for better performance
             },
             "messages_config": {
                 "receive_final_transcripts": True,
