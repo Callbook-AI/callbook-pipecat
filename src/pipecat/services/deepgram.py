@@ -395,21 +395,39 @@ class DeepgramGladiaDetector:
             logger.exception(f"❌ DeepgramGladiaDetector exception in stop: {e}")
 
     async def _setup_gladia(self):
-        async with aiohttp.ClientSession() as session:
-            logger.debug("Setting up Gladia session with parameters")
-            logger.debug(f"Gladia settings: {self._settings}")
-            async with session.post(
-                self._url,
-                headers={"X-Gladia-Key": self._api_key, "Content-Type": "application/json"},
-                json=self._settings,
-            ) as response:
-                if response.ok:
-                    return await response.json()
-                else:
-                    logger.error(
-                        f"Gladia error: {response.status}: {response.text or response.reason}"
-                    )
-                    raise Exception(f"Failed to initialize Gladia session: {response.status}")
+        """
+        Setup Gladia session and get connection URL.
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "X-Gladia-Key": self._api_key,
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {
+                    "x_gladia_key": self._api_key,
+                    "reinitialize_session": True,
+                    "live_config": self._settings
+                }
+                
+                logger.debug("🔧 DeepgramGladiaDetector: Setting up Gladia session")
+                async with session.post(
+                    self._url,
+                    headers={"X-Gladia-Key": self._api_key, "Content-Type": "application/json"},
+                    json=self._settings,
+                ) as response:
+                    if response.status != 201:
+                        error_text = await response.text()
+                        raise Exception(f"Failed to create Gladia session: {response.status} - {error_text}")
+                    
+                    data = await response.json()
+                    self._connection_id = data.get("id")
+                    logger.info(f"✅ DeepgramGladiaDetector: Gladia session created - ID: {self._connection_id}")
+                    
+        except Exception as e:
+            logger.exception(f"❌ DeepgramGladiaDetector exception in _setup_gladia: {e}")
+            raise
 
     async def _connect(self):
         """
