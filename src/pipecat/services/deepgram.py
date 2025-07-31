@@ -43,7 +43,7 @@ from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.rex import regex_list_matches
 from pipecat.utils.string import is_equivalent_basic
 from pipecat.utils.text import voicemail
-from services.gladia import GladiaSTTService
+from pipecat.services.gladia import GladiaSTTService
 
 
 # See .env.example for Deepgram configuration needed
