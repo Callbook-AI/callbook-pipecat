@@ -145,23 +145,23 @@ def language_to_gladia_language(language: Language) -> Optional[str]:
 class GladiaSTTService(STTService):
     class InputParams(BaseModel):
         language: Optional[Language] = Language.EN
-        endpointing: Optional[float] = 0.2
-        maximum_duration_without_endpointing: Optional[int] = 10
-        audio_enhancer: Optional[bool] = None
+        endpointing: Optional[float] = 0.4
+        maximum_duration_without_endpointing: Optional[int] = 6
+        audio_enhancer: Optional[bool] = False
         words_accurate_timestamps: Optional[bool] = None
-        speech_threshold: Optional[float] = 0.99
+        speech_threshold: Optional[float] = 0.6
         # Additional parameters to match Deepgram
         model: Optional[str] = "solaria-1"
         allow_interruptions: Optional[bool] = True
         detect_voicemail: Optional[bool] = True
-        region: Optional[str] = "us-west"
+        region: Optional[str] = "us-east"
 
     def __init__(
         self,
         *,
         api_key: str,
         url: str = "https://api.gladia.io/v2/live",
-        confidence: float = 0.3,  # Lowered for faster response
+        confidence: float = 0.6,  # Lowered for faster response
         sample_rate: Optional[int] = None,
         params: InputParams = InputParams(),
         on_no_punctuation_seconds: float = 0.6,  # Reduced for faster aggregation
