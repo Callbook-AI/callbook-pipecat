@@ -31,6 +31,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    LLMMessagesAppendAndProcessFrame
 )
 from pipecat.processors.aggregators.openai_llm_context import (
     OpenAILLMContext,
@@ -263,6 +264,18 @@ class LLMContextResponseAggregator(BaseLLMResponseAggregator):
             # Reset our accumulator state.
             self.reset()
 
+    async def push_context_with_no_aggregation(self):
+        
+        # Reset the aggregation. Reset it before pushing it down, otherwise
+        # if the tasks gets cancelled we won't be able to clear things up.
+        self._aggregation = ""
+
+        frame = OpenAILLMContextFrame(self._context)
+        await self.push_frame(frame)
+
+        # Reset our accumulator state.
+        self.reset()
+
 
 class LLMUserContextAggregator(LLMContextResponseAggregator):
     """This is a user LLM aggregator that uses an LLM context to store the
@@ -330,6 +343,9 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
             self.set_messages(frame.messages)
         elif isinstance(frame, LLMSetToolsFrame):
             self.set_tools(frame.tools)
+        elif isinstance(frame, LLMMessagesAppendAndProcessFrame):
+            await self.push_context_with_no_aggregation()
+            await self.push_frame(frame, direction)
         else:
             await self.push_frame(frame, direction)
 
