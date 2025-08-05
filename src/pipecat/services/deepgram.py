@@ -925,10 +925,19 @@ class DeepgramSTTService(STTService):
         if not self._last_interim_time: self._last_interim_time = 0.0
 
         reference_time = max(self._last_interim_time, self._last_time_accum_transcription)
-        
+
+        # when fast response is enabled, we send accum transcriptions as soon as user stops speaking
+        if self._fast_response and not self._vad_active and len(self._accum_transcription_frames):
+            last_accum_transcription = self._accum_transcription_frames[-1]
+            if not self._is_accum_transcription(last_accum_transcription.text):
+                logger.debug("Sending accum transcription because no user speaking")
+                await self._send_accum_transcriptions()
+                return
+            
         if current_time - reference_time > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
             logger.debug("Sending accum transcription because of timeout")
             await self._send_accum_transcriptions()
+            return
 
     async def _handle_false_interim(self, current_time):
 
@@ -1020,12 +1029,15 @@ class DeepgramSTTService(STTService):
         self._append_accum_transcription(frame)
         self._was_first_transcript_receipt = True
 
-        if self._fast_response:
-            speech_final = False # Ignore speech final in fast response mode
+        
 
-        if not self._is_accum_transcription(frame.text) or speech_final:
-            await self._send_accum_transcriptions()
-    
+        if not self._fast_response:
+            if not self._is_accum_transcription(frame.text) or speech_final:
+                await self._send_accum_transcriptions()
+        else:
+            if not self._is_accum_transcription(frame.text) and not self._vad_active:
+                await self._send_accum_transcriptions()
+
     async def _on_interim_transcript_message(self, transcript, language, start_time):
         
         self._last_interim_time = time.time()
