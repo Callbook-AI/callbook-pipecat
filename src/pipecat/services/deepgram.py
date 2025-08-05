@@ -921,8 +921,12 @@ class DeepgramSTTService(STTService):
         return len(transcript.split(" "))
 
     async def _async_handle_accum_transcription(self, current_time):
+
+        if not self._last_interim_time: self._last_interim_time = 0.0
+
+        reference_time = max(self._last_interim_time, self._last_time_accum_transcription)
         
-        if current_time - self._last_time_accum_transcription > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
+        if current_time - reference_time > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
             logger.debug("Sending accum transcription because of timeout")
             await self._send_accum_transcriptions()
 
