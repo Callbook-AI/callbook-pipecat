@@ -323,7 +323,6 @@ class DeepgramGladiaDetector:
             },
             "messages_config": {
                 "receive_final_transcripts": True,
-                "receive_interim_results": False,  # Only finals for backup
                 "receive_speech_events": True,  # Track speech patterns
                 "receive_pre_processing_events": False,
                 "receive_realtime_processing_events": False,
