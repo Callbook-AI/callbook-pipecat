@@ -66,7 +66,7 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3
+DEFAULT_ON_NO_PUNCTUATION_SECONDS = 2
 IGNORE_REPEATED_MSG_AT_START_SECONDS = 4
 VOICEMAIL_DETECTION_SECONDS = 10
 FALSE_INTERIM_SECONDS = 1.3
@@ -609,6 +609,7 @@ class DeepgramSTTService(STTService):
         allow_interruptions: bool = True,
         gladia_api_key: Optional[str] = None,  # NEW: Gladia API key for intelligent backup
         gladia_timeout: float = 1.8,  # Timeout for backup activation
+        fast_response: bool = False,
         **kwargs,
     ):
         sample_rate = sample_rate or (live_options.sample_rate if live_options else None)
@@ -640,6 +641,7 @@ class DeepgramSTTService(STTService):
         self.api_key = api_key
         self.detect_voicemail = detect_voicemail  
         self._allow_stt_interruptions = allow_interruptions
+        self._fast_response = fast_response
         logger.debug(f"Allow ** interruptions: {self._allow_stt_interruptions}")
 
         self._settings = merged_options.to_dict()
@@ -965,7 +967,10 @@ class DeepgramSTTService(STTService):
             if self._intelligent_gladia_backup:
                 logger.info("🎯 DeepgramSTTService: Starting intelligent Gladia backup...")
                 await self._intelligent_gladia_backup.start()
-                logger.info("🎯 DeepgramSTTService: ✅ Intelligent backup started and ready")
+            
+            if not self._async_handler_task:
+                self._async_handler_task = self.create_monitored_task(self._async_handler)
+            
         except Exception as e:
             logger.exception(f"{self} exception in start: {e}")
             raise       
@@ -1087,6 +1092,7 @@ class DeepgramSTTService(STTService):
         try:
             if self._async_handler_task:
                 await self.cancel_task(self._async_handler_task)
+                self._async_handler_task = None
 
             if self._connection.is_connected:
                 logger.debug("Disconnecting from Deepgram")
@@ -1154,9 +1160,22 @@ class DeepgramSTTService(STTService):
 
     async def _async_handle_accum_transcription(self, current_time):
 
-        if current_time - self._last_time_accum_transcription > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
+        if not self._last_interim_time: self._last_interim_time = 0.0
+
+        reference_time = max(self._last_interim_time, self._last_time_accum_transcription)
+
+        # when fast response is enabled, we send accum transcriptions as soon as user stops speaking
+        if self._fast_response and not self._vad_active and len(self._accum_transcription_frames):
+            last_accum_transcription = self._accum_transcription_frames[-1]
+            if not self._is_accum_transcription(last_accum_transcription.text):
+                logger.debug("Sending accum transcription because no user speaking")
+                await self._send_accum_transcriptions()
+                return
+            
+        if current_time - reference_time > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
             logger.debug("Sending accum transcription because of timeout")
             await self._send_accum_transcriptions()
+            return
 
     async def _handle_false_interim(self, current_time):
 
@@ -1247,9 +1266,16 @@ class DeepgramSTTService(STTService):
         self._handle_first_message(frame.text)
         self._append_accum_transcription(frame)
         self._was_first_transcript_receipt = True
-        if not self._is_accum_transcription(frame.text) or speech_final:
-            await self._send_accum_transcriptions()
-    
+
+        
+
+        if not self._fast_response:
+            if not self._is_accum_transcription(frame.text) or speech_final:
+                await self._send_accum_transcriptions()
+        else:
+            if not self._is_accum_transcription(frame.text) and not self._vad_active:
+                await self._send_accum_transcriptions()
+
     async def _on_interim_transcript_message(self, transcript, language, start_time):
         
         self._last_interim_time = time.time()

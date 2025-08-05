@@ -728,6 +728,10 @@ class GladiaSTTService(STTService):
             self._vad_active = False
         elif isinstance(frame, VADActiveFrame):
             self._vad_active = True
+            fake_interim = InterimTranscriptionFrame(
+                "VAD active", "", time_now_iso8601(), self.language
+            )
+            await self.push_frame(fake_interim)
             
         if isinstance(frame, StartInterruptionFrame):
             logger.debug("Received StartInterruptionFrame - clearing accumulated transcriptions")

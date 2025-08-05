@@ -304,6 +304,11 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
 
         self._aggregation_event = asyncio.Event()
         self._aggregation_task = None
+        
+        # Add buffering for STT services without interim results
+        self._transcript_buffer_timeout = 2.0  # 2s buffer for Gladia-like services
+        self._last_transcript_time = 0
+        self._pending_transcripts = []
 
         self.reset()
 
@@ -365,8 +370,17 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
     async def _handle_user_stopped_speaking(self, _: UserStoppedSpeakingFrame):
         self._last_user_speaking_time = time.time()
         self._user_speaking = False
-        if not self._seen_interim_results:
+        
+        # When user stops speaking, we should push the aggregation regardless
+        # of whether we've seen interim results or not. This ensures that
+        # all transcripts received during the speaking period are grouped together.
+        if self._aggregation.strip():
+            # Push immediately when user stops speaking
             await self.push_aggregation()
+        else:
+            # If no aggregation yet, set event to trigger handler
+            # This handles cases where transcripts arrive slightly after VAD events
+            self._aggregation_event.set()
 
     async def _handle_transcription(self, frame: TranscriptionFrame):
         text = frame.text
@@ -375,10 +389,25 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         if not text.strip():
             return
 
+        current_time = time.time()
+        
+        # Add text to aggregation
         self._aggregation += f" {text}" if self._aggregation else text
+        
         # We just got a final result, so let's reset interim results.
         self._seen_interim_results = False
-        # Reset aggregation timer.
+        
+        # Update last transcript time for buffering logic
+        self._last_transcript_time = current_time
+        
+        # If user is currently speaking (according to VAD), don't trigger
+        # aggregation yet - wait for UserStoppedSpeakingFrame
+        if self._user_speaking:
+            logger.debug(f"Received transcript while user speaking: '{text}' - buffering")
+            return
+        
+        # If user is not speaking, this might be a late transcript or
+        # a service without proper VAD, so use buffering logic
         self._aggregation_event.set()
 
     async def _handle_interim_transcription(self, _: InterimTranscriptionFrame):
@@ -398,7 +427,19 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
             try:
                 await asyncio.wait_for(self._aggregation_event.wait(), self._aggregation_timeout)
                 await self._maybe_push_bot_interruption()
+                
+                # For STT services without interim results (like Gladia), implement buffering
+                if not self._seen_interim_results and self._aggregation:
+                    # Wait for the buffer timeout to see if more transcripts arrive
+                    # that should be grouped into the same user message
+                    await asyncio.sleep(self._transcript_buffer_timeout)
+                
+                # Now push the aggregation if we have content and user isn't speaking
+                if self._aggregation and not self._user_speaking:
+                    await self.push_aggregation()
+                    
             except asyncio.TimeoutError:
+                # Timeout occurred - push what we have if user isn't speaking
                 if not self._user_speaking:
                     await self.push_aggregation()
 
