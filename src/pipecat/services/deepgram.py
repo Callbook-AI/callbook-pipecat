@@ -373,22 +373,28 @@ class DeepgramGladiaDetector:
     async def notify_deepgram_final(self, transcript: str, timestamp: float):
         """Notify that Deepgram has sent a final transcript."""
         try:
-            # Update tracking info
+            # Update tracking info regardless
             self._last_deepgram_transcript = transcript.strip().lower()
             self._last_deepgram_time = timestamp
             
-            transcript_key = self._create_transcript_key(transcript, timestamp)
-            
-            if transcript_key in self._pending_transcripts:
-                logger.info(f"🎯 DeepgramGladiaDetector: Deepgram final received, canceling backup: '{transcript}'")
-                # Cancel the pending Gladia transcript
-                pending_info = self._pending_transcripts.pop(transcript_key, None)
+            # Cancel any recent pending transcripts, as Deepgram has now responded for this timeframe.
+            # Use a time window (e.g., 2 seconds) to decide which backups are now irrelevant.
+            cancellation_window = 2.0 
+            keys_to_cancel = []
+            for key, pending_info in self._pending_transcripts.items():
+                if abs(timestamp - pending_info['timestamp']) < cancellation_window:
+                    keys_to_cancel.append(key)
+
+            for key in keys_to_cancel:
+                pending_info = self._pending_transcripts.pop(key, None)
                 if pending_info and 'timeout_task' in pending_info:
+                    logger.info(f"🎯 DeepgramGladiaDetector: Deepgram final received, canceling nearby backup: '{pending_info['transcript']}'")
                     pending_info['timeout_task'].cancel()
-            else:
-                # Mark this transcript as processed by Deepgram
-                self._processed_transcripts.add(transcript_key)
-                logger.debug(f"🎯 DeepgramGladiaDetector: Marked Deepgram transcript as processed: {transcript_key}")
+
+            # Also mark the specific transcript as processed in case of near-simultaneous results
+            transcript_key = self._create_transcript_key(transcript, timestamp)
+            self._processed_transcripts.add(transcript_key)
+            logger.debug(f"🎯 DeepgramGladiaDetector: Marked Deepgram transcript as processed: {transcript_key}")
                 
         except Exception as e:
             logger.exception(f"❌ DeepgramGladiaDetector notify error: {e}")
@@ -562,13 +568,19 @@ class DeepgramGladiaDetector:
             
             # Check if still pending (not canceled by Deepgram)
             if transcript_key in self._pending_transcripts:
-                # Additional check: Don't activate backup if bot just started speaking recently
+                pending_info = self._pending_transcripts[transcript_key]
+                transcript_timestamp = pending_info['timestamp']
+                
+                # Additional check: ONLY suppress if the transcript appears AFTER the bot started speaking
                 if (self._stt_service_ref and 
                     hasattr(self._stt_service_ref, '_bot_started_speaking_time') and 
                     self._stt_service_ref._bot_started_speaking_time):
-                    time_since_bot_started = time.time() - self._stt_service_ref._bot_started_speaking_time
-                    if time_since_bot_started < 3.0:  # Less than 3 seconds since bot started
-                        logger.info(f"🚫 DeepgramGladiaDetector: Backup suppressed - bot recently started speaking ({time_since_bot_started:.2f}s): '{transcript}'")
+                    
+                    bot_start_time = self._stt_service_ref._bot_started_speaking_time
+                    
+                    # ONLY suppress if the transcript appears AFTER the bot started speaking
+                    if transcript_timestamp > bot_start_time:
+                        logger.info(f"🚫 DeepgramGladiaDetector: Backup suppressed - user spoke after bot started speaking: '{transcript}'")
                         self._pending_transcripts.pop(transcript_key, None)
                         return
                 
@@ -753,7 +765,7 @@ class DeepgramSTTService(STTService):
                 endpointing=0.2,  # More sensitive
                 speech_threshold=0.3,  # Lower threshold
                 timeout_seconds=2.0,  # Longer for accuracy
-                deepgram_wait_timeout=2.5,  # Longer timeout to give Deepgram more time
+                deepgram_wait_timeout=1.0,  # Changed from 2.5 to 1.0 to reduce race condition
                 stt_service_ref=self  # Pass reference to self for accessing bot state
             )
             
