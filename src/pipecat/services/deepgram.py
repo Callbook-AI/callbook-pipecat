@@ -301,6 +301,10 @@ class DeepgramGladiaDetector:
         self._last_transcript_time = 0
         self._start_time = time.time()
         
+        # VAD-based filtering for backup system
+        self._last_vad_inactive_time = None  # Track when VAD goes inactive
+        self._vad_backup_window = 1.5  # Only allow backup transcripts within 1.5s of VAD inactive
+        
         # Optimized Gladia configuration for maximum reliability as backup
         self._settings = {
             "encoding": "wav/pcm",
@@ -480,9 +484,21 @@ class DeepgramGladiaDetector:
             logger.exception(f"❌ DeepgramGladiaDetector receive error: {e}")
 
     async def _process_backup_transcript(self, transcript: str, confidence: float):
-        """Process backup transcript with intelligent coordination."""
+        """Process backup transcript with intelligent coordination and VAD filtering."""
         try:
             current_time = time.time()
+            
+            # VAD-based filtering: Only process backup transcripts within window after VAD inactive
+            if self._last_vad_inactive_time is not None:
+                time_since_vad_inactive = current_time - self._last_vad_inactive_time
+                if time_since_vad_inactive > self._vad_backup_window:
+                    logger.debug(f"🚫 DeepgramGladiaDetector: Backup ignored - outside VAD window: '{transcript}' ({time_since_vad_inactive:.1f}s > {self._vad_backup_window}s)")
+                    return
+                else:
+                    logger.debug(f"✅ DeepgramGladiaDetector: Backup within VAD window: '{transcript}' ({time_since_vad_inactive:.1f}s <= {self._vad_backup_window}s)")
+            else:
+                logger.debug(f"⚠️ DeepgramGladiaDetector: No VAD reference time, allowing backup: '{transcript}'")
+            
             transcript_key = self._create_transcript_key(transcript, current_time)
             
             # Check if Deepgram already processed this transcript
@@ -541,6 +557,11 @@ class DeepgramGladiaDetector:
             logger.debug(f"🎯 DeepgramGladiaDetector: Backup timeout canceled for: '{transcript}'")
         except Exception as e:
             logger.exception(f"❌ DeepgramGladiaDetector backup timeout error: {e}")
+
+    async def update_vad_inactive_time(self, timestamp: float = None):
+        """Update the VAD inactive timestamp for filtering backup transcripts."""
+        self._last_vad_inactive_time = timestamp or time.time()
+        logger.debug(f"🎤 DeepgramGladiaDetector: VAD inactive timestamp updated: {self._last_vad_inactive_time}")
 
 
 class DeepgramSTTService(STTService):
@@ -639,6 +660,10 @@ class DeepgramSTTService(STTService):
         self._pending_deepgram_finals = {}  # Store Deepgram finals waiting for coordination
         self._backup_enabled = False  # Flag to track backup status
         
+        # VAD-based filtering for backup system
+        self._last_vad_inactive_time = None  # Track when VAD goes inactive
+        self._vad_backup_window = 1.5  # Only allow backup transcripts within 1.5s of VAD inactive
+        
         self._setup_intelligent_gladia_backup()
 
     def _setup_intelligent_gladia_backup(self):
@@ -694,7 +719,7 @@ class DeepgramSTTService(STTService):
                 endpointing=0.2,  # More sensitive
                 speech_threshold=0.3,  # Lower threshold
                 timeout_seconds=2.0,  # Longer for accuracy
-                deepgram_wait_timeout=self._gladia_timeout
+                deepgram_wait_timeout=1.5  # Match VAD window for consistency
             )
             
             self._backup_enabled = True
@@ -951,19 +976,29 @@ class DeepgramSTTService(STTService):
                 self._current_speech_start_time = current_time
                 logger.debug(f"🎤 DeepgramSTTService: ⏱️ Starting speech detection timer at chunk #{self._audio_chunk_count}")
             
-            # Send audio to primary Deepgram service
-            logger.trace(f"⚡ DeepgramSTTService: Sending audio chunk #{self._audio_chunk_count} to Deepgram ({len(audio)} bytes)")
-            await self._connection.send(audio)
+            # Send audio to primary Deepgram service (if connected)
+            deepgram_sent = False
+            if self._connection and self._connection.is_connected:
+                logger.trace(f"⚡ DeepgramSTTService: Sending audio chunk #{self._audio_chunk_count} to Deepgram ({len(audio)} bytes)")
+                await self._connection.send(audio)
+                deepgram_sent = True
+            else:
+                logger.debug(f"⚠️ DeepgramSTTService: Deepgram not connected, relying on backup system")
             
             # Send to sibling services if available
             if self._sibling_deepgram:
                 logger.trace(f"🔧 DeepgramSTTService: Sending audio to sibling Deepgram")
                 await self._sibling_deepgram.send_audio(audio)
                 
-            # Send to intelligent backup service
+            # Send to intelligent backup service (always send, it will filter appropriately)
             if self._intelligent_gladia_backup:
                 logger.trace(f"🎯 DeepgramSTTService: Sending audio to intelligent backup")
                 await self._intelligent_gladia_backup.send_audio(audio)
+            elif not deepgram_sent:
+                # If neither Deepgram nor backup is available, we have a problem
+                logger.error("🚨 DeepgramSTTService: No STT services available (Deepgram down, no backup)")
+                yield ErrorFrame("No STT services available")
+                return
                 
             yield None
         except Exception as e:
@@ -974,6 +1009,12 @@ class DeepgramSTTService(STTService):
     async def _connect(self):
         try:
             logger.debug("Connecting to Deepgram")
+            
+            # Validate API key before attempting connection
+            if not self.api_key or self.api_key.strip() == "":
+                raise ValueError("Deepgram API key is empty or invalid")
+            
+            logger.debug(f"Using Deepgram API key: {self.api_key[:10]}...")
 
             self._connection: AsyncListenWebSocketClient = self._client.listen.asyncwebsocket.v("1")
 
@@ -995,13 +1036,19 @@ class DeepgramSTTService(STTService):
                     self._on_utterance_end,
                 )
 
-            if not await self._connection.start(options=self._settings, addons=self._addons):
-                logger.error(f"{self}: unable to connect to Deepgram")
+            logger.debug(f"Deepgram connection settings: {self._settings}")
+            logger.debug(f"Deepgram addons: {self._addons}")
+            
+            connection_result = await self._connection.start(options=self._settings, addons=self._addons)
+            if not connection_result:
+                logger.error(f"{self}: unable to connect to Deepgram - connection failed")
+                raise ConnectionError("Failed to establish Deepgram connection")
             else:
-                logger.debug(f"Connected to Deepgram")
+                logger.debug(f"Successfully connected to Deepgram")
         except Exception as e:
             logger.exception(f"{self} exception in _connect: {e}")
-            raise
+            # Don't raise here to allow fallback to backup system only
+            logger.warning(f"Deepgram connection failed, backup system will handle all transcriptions")
 
     async def _disconnect(self):
         try:
@@ -1385,8 +1432,31 @@ class DeepgramSTTService(STTService):
         if isinstance(frame, VADInactiveFrame):
             logger.debug("🎤 DeepgramSTTService: VAD inactive")
             self._vad_active = False
+            
+            # Update backup system with VAD inactive time for filtering
+            if self._intelligent_gladia_backup:
+                await self._intelligent_gladia_backup.update_vad_inactive_time()
+                logger.debug("🎯 DeepgramSTTService: Notified backup of VAD inactive")
+            
             if self._connection and self._connection.is_connected:
                 await self._connection.finalize()  
         elif isinstance(frame, VADActiveFrame):
             logger.debug("🎤 DeepgramSTTService: VAD active")
             self._vad_active = True
+
+    def is_deepgram_connected(self) -> bool:
+        """Check if Deepgram is currently connected."""
+        return self._connection is not None and self._connection.is_connected
+
+    def get_connection_status(self) -> Dict:
+        """Get comprehensive connection status."""
+        deepgram_connected = self.is_deepgram_connected()
+        backup_available = self._backup_enabled and self._intelligent_gladia_backup is not None
+        
+        return {
+            "deepgram_connected": deepgram_connected,
+            "backup_available": backup_available,
+            "primary_system": "Deepgram" if deepgram_connected else "Backup" if backup_available else "None",
+            "reliability": "Ultra-High" if backup_available else "Standard" if deepgram_connected else "Limited",
+            "status": "Healthy" if deepgram_connected or backup_available else "Degraded"
+        }
