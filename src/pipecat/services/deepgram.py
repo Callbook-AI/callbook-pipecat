@@ -66,7 +66,7 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-DEFAULT_ON_NO_PUNCTUATION_SECONDS = 3
+DEFAULT_ON_NO_PUNCTUATION_SECONDS = 2
 IGNORE_REPEATED_MSG_AT_START_SECONDS = 4
 VOICEMAIL_DETECTION_SECONDS = 10
 FALSE_INTERIM_SECONDS = 1.3
@@ -471,6 +471,7 @@ class DeepgramSTTService(STTService):
         addons: Optional[Dict] = None,
         detect_voicemail: bool = True,  
         allow_interruptions: bool = True,
+        fast_response: bool = False,
         gladia_api_key: Optional[str] = None,  # NEW: Gladia API key for enhanced accuracy
         gladia_timeout: float = 1.5,
         **kwargs,
@@ -504,6 +505,7 @@ class DeepgramSTTService(STTService):
         self.api_key = api_key
         self.detect_voicemail = detect_voicemail  
         self._allow_stt_interruptions = allow_interruptions
+        self._fast_response = fast_response
         logger.debug(f"Allow ** interruptions: {self._allow_stt_interruptions}")
 
         self._settings = merged_options.to_dict()
@@ -754,6 +756,10 @@ class DeepgramSTTService(STTService):
                 logger.info("🎯 DeepgramSTTService: Starting enhanced Gladia transcription...")
                 await self._complementary_gladia.start()
                 logger.info("🎯 DeepgramSTTService: ✅ Enhanced transcription started and ready")
+            
+            if not self._async_handler_task:
+                self._async_handler_task = self.create_monitored_task(self._async_handler)
+            
         except Exception as e:
             logger.exception(f"{self} exception in start: {e}")
             raise       
@@ -852,6 +858,7 @@ class DeepgramSTTService(STTService):
         try:
             if self._async_handler_task:
                 await self.cancel_task(self._async_handler_task)
+                self._async_handler_task = None
 
             if self._connection.is_connected:
                 logger.debug("Disconnecting from Deepgram")
@@ -914,7 +921,7 @@ class DeepgramSTTService(STTService):
         return len(transcript.split(" "))
 
     async def _async_handle_accum_transcription(self, current_time):
-
+        
         if current_time - self._last_time_accum_transcription > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
             logger.debug("Sending accum transcription because of timeout")
             await self._send_accum_transcriptions()
@@ -1008,6 +1015,10 @@ class DeepgramSTTService(STTService):
         self._handle_first_message(frame.text)
         self._append_accum_transcription(frame)
         self._was_first_transcript_receipt = True
+
+        if self._fast_response:
+            speech_final = False # Ignore speech final in fast response mode
+
         if not self._is_accum_transcription(frame.text) or speech_final:
             await self._send_accum_transcriptions()
     
