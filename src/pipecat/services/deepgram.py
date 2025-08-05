@@ -281,6 +281,7 @@ class DeepgramGladiaDetector:
         speech_threshold: float = 0.3,  # Lower for maximum detection
         timeout_seconds: float = 2.0,  # Longer timeout for better accuracy
         deepgram_wait_timeout: float = 1.8,  # Wait time for Deepgram finals
+        stt_service_ref=None,  # Reference to main STT service for accessing bot state
     ):
         self._api_key = api_key
         self._callback = callback
@@ -290,6 +291,7 @@ class DeepgramGladiaDetector:
         self._confidence = confidence
         self._timeout_seconds = timeout_seconds
         self._deepgram_wait_timeout = deepgram_wait_timeout
+        self._stt_service_ref = stt_service_ref  # Reference to main STT service
         
         # WebSocket connection
         self._websocket = None
@@ -300,6 +302,8 @@ class DeepgramGladiaDetector:
         self._processed_transcripts = set()  # Deduplication
         self._last_transcript_time = 0
         self._start_time = time.time()
+        self._last_deepgram_transcript = ""  # Track last Deepgram transcript for similarity checking
+        self._last_deepgram_time = 0  # Track timing
         
         # VAD-based filtering for backup system
         self._last_vad_inactive_time = None  # Track when VAD goes inactive
@@ -369,6 +373,10 @@ class DeepgramGladiaDetector:
     async def notify_deepgram_final(self, transcript: str, timestamp: float):
         """Notify that Deepgram has sent a final transcript."""
         try:
+            # Update tracking info
+            self._last_deepgram_transcript = transcript.strip().lower()
+            self._last_deepgram_time = timestamp
+            
             transcript_key = self._create_transcript_key(transcript, timestamp)
             
             if transcript_key in self._pending_transcripts:
@@ -499,6 +507,19 @@ class DeepgramGladiaDetector:
             else:
                 logger.debug(f"⚠️ DeepgramGladiaDetector: No VAD reference time, allowing backup: '{transcript}'")
             
+            # Check similarity to recent Deepgram transcript
+            if self._last_deepgram_transcript and self._last_deepgram_time:
+                time_since_deepgram = current_time - self._last_deepgram_time
+                transcript_normalized = transcript.strip().lower()
+                
+                # If very recent Deepgram transcript and similar content, skip backup
+                if (time_since_deepgram < 3.0 and 
+                    (transcript_normalized == self._last_deepgram_transcript or
+                     transcript_normalized in self._last_deepgram_transcript or
+                     self._last_deepgram_transcript in transcript_normalized)):
+                    logger.debug(f"🔄 DeepgramGladiaDetector: Backup ignored - similar to recent Deepgram ({time_since_deepgram:.1f}s ago): '{transcript}'")
+                    return
+            
             transcript_key = self._create_transcript_key(transcript, current_time)
             
             # Check if Deepgram already processed this transcript
@@ -541,6 +562,16 @@ class DeepgramGladiaDetector:
             
             # Check if still pending (not canceled by Deepgram)
             if transcript_key in self._pending_transcripts:
+                # Additional check: Don't activate backup if bot just started speaking recently
+                if (self._stt_service_ref and 
+                    hasattr(self._stt_service_ref, '_bot_started_speaking_time') and 
+                    self._stt_service_ref._bot_started_speaking_time):
+                    time_since_bot_started = time.time() - self._stt_service_ref._bot_started_speaking_time
+                    if time_since_bot_started < 3.0:  # Less than 3 seconds since bot started
+                        logger.info(f"🚫 DeepgramGladiaDetector: Backup suppressed - bot recently started speaking ({time_since_bot_started:.2f}s): '{transcript}'")
+                        self._pending_transcripts.pop(transcript_key, None)
+                        return
+                
                 logger.warning(f"⏰ DeepgramGladiaDetector: BACKUP ACTIVATED - Deepgram timeout, using backup: '{transcript}'")
                 
                 # Remove from pending
@@ -615,6 +646,7 @@ class DeepgramSTTService(STTService):
         self._addons = addons
         self._user_speaking = False
         self._bot_speaking = True
+        self._bot_started_speaking_time = None  # Track when bot started speaking
         self._on_no_punctuation_seconds = on_no_punctuation_seconds
         self._vad_active = False
 
@@ -719,7 +751,8 @@ class DeepgramSTTService(STTService):
                 endpointing=0.2,  # More sensitive
                 speech_threshold=0.3,  # Lower threshold
                 timeout_seconds=2.0,  # Longer for accuracy
-                deepgram_wait_timeout=1.5  # Match VAD window for consistency
+                deepgram_wait_timeout=2.5,  # Longer timeout to give Deepgram more time
+                stt_service_ref=self  # Pass reference to self for accessing bot state
             )
             
             self._backup_enabled = True
@@ -1106,10 +1139,14 @@ class DeepgramSTTService(STTService):
 
     async def _handle_bot_speaking(self):
         self._bot_speaking = True
+        self._bot_started_speaking_time = time.time()  # Track when bot started speaking
+        logger.debug(f"🤖 DeepgramSTTService: Bot started speaking at {self._bot_started_speaking_time}")
 
 
     async def _handle_bot_silence(self):
         self._bot_speaking = False
+        self._bot_started_speaking_time = None  # Reset the timestamp
+        logger.debug(f"🤖 DeepgramSTTService: Bot stopped speaking")
 
 
     def _transcript_words_count(self, transcript: str):
@@ -1221,7 +1258,7 @@ class DeepgramSTTService(STTService):
             InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
         )
 
-    async def _should_ignore_transcription(self, result: LiveResultResponse):
+    async def _should_ignore_transcription(self, result: LiveResultResponse, backup_source=False):
 
         is_final = result.is_final
         confidence = result.channel.alternatives[0].confidence
@@ -1249,8 +1286,32 @@ class DeepgramSTTService(STTService):
             logger.debug("Ignoring Deepgram interruption because allow_interruptions is False")
             return True
         
+        # Enhanced logic for backup system - prevent false interruptions
+        if backup_source and self._bot_speaking:
+            # For backup transcripts, be more conservative about interruptions
+            # Only allow interruption if it's a longer phrase (more than 2 words) and high confidence
+            word_count = self._transcript_words_count(transcript)
+            if word_count <= 2 or confidence < 0.95:
+                logger.debug(f"Ignoring backup interruption - bot speaking, low word count ({word_count}) or confidence ({confidence:.2f}): '{transcript}'")
+                return True
+                
+            # Check if this transcript is very recent to when bot started speaking
+            current_time = time.time()
+            if hasattr(self, '_bot_started_speaking_time') and self._bot_started_speaking_time:
+                time_since_bot_started = current_time - self._bot_started_speaking_time
+                if time_since_bot_started < 1.5:  # Less than 1.5 seconds since bot started
+                    logger.debug(f"Ignoring backup interruption - too soon after bot started speaking ({time_since_bot_started:.2f}s): '{transcript}'")
+                    return True
+                    
+            # Additional check: if transcript seems like an echo or duplicate of recent conversation
+            # This is especially important for backup systems that might pick up echo
+            if (hasattr(self, '_last_time_transcription') and 
+                time.time() - self._last_time_transcription < 2.0):
+                logger.debug(f"Ignoring backup interruption - too soon after last transcript ({time.time() - self._last_time_transcription:.2f}s): '{transcript}'")
+                return True
+        
         if self._bot_speaking and self._transcript_words_count(transcript) == 1: 
-            logger.debug(f"Ignoring Deepgram interruption because bot is speaking: {transcript}")
+            logger.debug(f"Ignoring {'backup' if backup_source else 'primary'} interruption because bot is speaking (single word): {transcript}")
             return True
 
         return False
@@ -1309,10 +1370,10 @@ class DeepgramSTTService(STTService):
             logger.info(f"   ⏰ Start time: {start_time}")
             logger.info(f"   🗣️ Speech final: {speech_final}")
             
-            # Handle Deepgram finals - notify backup service
-            if is_final and not backup_source and self._intelligent_gladia_backup:
-                logger.debug(f"⚡ DeepgramSTTService: Notifying backup of Deepgram final: '{transcript}'")
-                await self._intelligent_gladia_backup.notify_deepgram_final(transcript, start_time)
+            # Handle Deepgram finals - notify backup service (will be done in _process_final_transcript)
+            # Only log for debug purposes here
+            if is_final and not backup_source:
+                logger.debug(f"⚡ DeepgramSTTService: Deepgram final transcript: '{transcript}'")
             
             logger.debug(f"✅ DeepgramSTTService: Processing transcript from {source_name}")
             await self._process_transcript_message(result, backup_source)
@@ -1346,7 +1407,7 @@ class DeepgramSTTService(STTService):
             logger.debug(f"   🎯 Confidence: {confidence:.2f}")
             logger.debug(f"   ⏰ Start time: {start_time}")
             
-            if await self._should_ignore_transcription(result):
+            if await self._should_ignore_transcription(result, backup_source):
                 logger.debug(f"🚫 DeepgramSTTService: Transcript ignored by filter")
                 return
             
@@ -1395,6 +1456,11 @@ class DeepgramSTTService(STTService):
         logger.debug(f"🎯 DeepgramSTTService: Calling _on_final_transcript_message for: '{transcript}'")
         await self._on_final_transcript_message(transcript, language, speech_final)
         self._last_time_transcription = start_time
+        
+        # Update backup service with processed transcript info
+        if self._intelligent_gladia_backup and not backup_source:
+            await self._intelligent_gladia_backup.notify_deepgram_final(transcript, start_time)
+            
         logger.debug(f"⏰ DeepgramSTTService: Updated last transcription time to {start_time}")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
