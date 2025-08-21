@@ -276,7 +276,7 @@ class DeepgramGladiaDetector:
         language: Language = Language.ES,
         url: str = "https://api.gladia.io/v2/live",
         sample_rate: int = 16_000,
-        confidence: float = 0.3,  # Lower threshold for maximum sensitivity
+        confidence: float = 0.1,  # Lower threshold for maximum sensitivity
         endpointing: float = 0.2,  # More sensitive to catch everything
         speech_threshold: float = 0.3,  # Lower for maximum detection
         timeout_seconds: float = 2.0,  # Longer timeout for better accuracy
@@ -762,7 +762,7 @@ class DeepgramSTTService(STTService):
                 callback=self.intelligent_backup_handler,
                 language=gladia_language,
                 sample_rate=self.sample_rate or 16000,
-                confidence=0.3,  # Lower for maximum sensitivity
+                confidence=0.1,  # Lower for maximum sensitivity
                 endpointing=0.2,  # More sensitive
                 speech_threshold=0.3,  # Lower threshold
                 timeout_seconds=2.0,  # Longer for accuracy
