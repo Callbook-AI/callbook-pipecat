@@ -7,14 +7,15 @@ VOICEMAIL_PHRASES = [
 ]
 
 def is_text_voicemail(text: str):
-
+    print('is_text_voicemail  Verifying if transcripot has voicemail phrases')
     content = text.lower().replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u").replace(" ", "")
-
+    print('is_text_voicemail normalized transcript:', content)
     for phrase in VOICEMAIL_PHRASES:
         phrase = phrase.replace(" ", "")
         if phrase in content:
+            print('is_text_voicemail Phrase found:', phrase)
             return True
-        
+    print('is_text_voicemail No Phrases found')
     return False
 
 
