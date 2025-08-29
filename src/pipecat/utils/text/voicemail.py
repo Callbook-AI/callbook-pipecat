@@ -3,7 +3,7 @@ VOICEMAIL_PHRASES = [
     'voice mail', 'voicemail', 'message', 'leave voicemail', 'grabar un mensaje', 'mensaje', 'marcando', 'mensaje predeterminado',
     'contestador', 'deje un mensaje', 'dejar un mensaje', 'mensaje de voz', 'despues del tono', 'oir el tono', 'movistar', 'predeterminado',
     'grabe su mensaje', 'buzon', 'tono', 'finalizar', 'grabe', 'buzon de voz', 'no se encuentra', 'no esta disponible', 'no contesta', 'correo',
-    'servicio', 'este es'
+    'servicio', 'este es', 'tendra costo', 'de este momento'
 ]
 
 def is_text_voicemail(text: str):
@@ -23,7 +23,7 @@ def is_text_voicemail(text: str):
 
 def _test_voicemail():
 
-    text = 'leave a message'
+    text = 'Tendrá costo a partir de este momento'
     is_voicemail = is_text_voicemail(text)
     print(is_voicemail)
 
