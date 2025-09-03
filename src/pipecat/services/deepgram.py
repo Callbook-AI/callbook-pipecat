@@ -10,7 +10,8 @@ import re
 import time
 import asyncio
 from typing import AsyncGenerator, Dict, List, Optional, Callable
-
+import random
+from dataclasses import dataclass
 
 import aiohttp
 from loguru import logger
@@ -70,6 +71,25 @@ DEFAULT_ON_NO_PUNCTUATION_SECONDS = 2
 IGNORE_REPEATED_MSG_AT_START_SECONDS = 4
 VOICEMAIL_DETECTION_SECONDS = 10
 FALSE_INTERIM_SECONDS = 1.3
+
+
+
+@dataclass
+class DeepgramError(Frame):
+    text: str
+
+    def __str__(self):
+        return F"{self.name}"
+
+
+@dataclass
+class DeepgramFatalError(Frame):
+    text: str
+
+    def __str__(self):
+        return F"{self.name}"
+
+
 
 
 class DeepgramTTSService(TTSService):
@@ -612,9 +632,11 @@ class DeepgramSTTService(STTService):
         self,
         *,
         api_key: str,
+        bakckup_api_keys: Optional[List[str]] = None,
         url: str = "",
         sample_rate: Optional[int] = None,
         on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS,
+        on_connection_error: Optional[Callable[[Frame], None]] = None,
         live_options: Optional[LiveOptions] = None,
         addons: Optional[Dict] = None,
         detect_voicemail: bool = True,  
@@ -651,6 +673,8 @@ class DeepgramSTTService(STTService):
         
         self.language = merged_options.language
         self.api_key = api_key
+        self.backup_api_keys = bakckup_api_keys or []
+        random.shuffle(self.backup_api_keys)
         self.detect_voicemail = detect_voicemail  
         self._allow_stt_interruptions = allow_interruptions
         self._fast_response = fast_response
@@ -669,7 +693,8 @@ class DeepgramSTTService(STTService):
         self._first_message_time = None
         self._last_interim_time = None
         self._restarted = False
-
+        self._error_count = 0
+        self._on_connection_error = on_connection_error
 
         self._setup_sibling_deepgram()
 
@@ -1091,6 +1116,7 @@ class DeepgramSTTService(STTService):
             logger.debug(f"Deepgram addons: {self._addons}")
             
             connection_result = await self._connection.start(options=self._settings, addons=self._addons)
+            
             if not connection_result:
                 logger.error(f"{self}: unable to connect to Deepgram - connection failed")
                 raise ConnectionError("Failed to establish Deepgram connection")
@@ -1100,6 +1126,7 @@ class DeepgramSTTService(STTService):
             logger.exception(f"{self} exception in _connect: {e}")
             # Don't raise here to allow fallback to backup system only
             logger.warning(f"Deepgram connection failed, backup system will handle all transcriptions")
+            await self._on_error(error=e)
 
     async def _disconnect(self):
         try:
@@ -1130,6 +1157,19 @@ class DeepgramSTTService(STTService):
         # NOTE(aleix): we don't disconnect (i.e. call finish on the connection)
         # because this triggers more errors internally in the Deepgram SDK. So,
         # we just forget about the previous connection and create a new one.
+        if self._error_count >= len(self.backup_api_keys):
+            logger.error(f"{self} too many connection errors, no more backup API keys available")
+
+            if self._on_connection_error:
+                self._on_connection_error(DeepgramFatalError(f"Too many connection errors: {error}"))
+            return
+        
+        if self._on_connection_error:
+            self._on_connection_error(DeepgramError(f"Connection error: {error}"))
+
+        self._error_count += 1
+        self.api_key = self.backup_api_keys[self._error_count - 1]
+        logger.info(f"{self} switching to backup Deepgram API key: {self.api_key[:10]}...")
         await self._connect()
 
     async def _on_speech_started(self, *args, **kwargs):
@@ -1137,6 +1177,7 @@ class DeepgramSTTService(STTService):
         await self._call_event_handler("on_speech_started", *args, **kwargs)
 
     async def _on_utterance_end(self, *args, **kwargs):
+        logger.debug("Deepgram VAD: Utterance ended")
         await self._call_event_handler("on_utterance_end", *args, **kwargs)
 
 
