@@ -1092,6 +1092,7 @@ class DeepgramSTTService(STTService):
             
             logger.debug(f"Using Deepgram API key: {self.api_key[:10]}...")
 
+            self._client._config.set_apikey(self.api_key)
             self._connection: AsyncListenWebSocketClient = self._client.listen.asyncwebsocket.v("1")
 
             self._connection.on(
