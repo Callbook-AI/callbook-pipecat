@@ -661,6 +661,12 @@ class STTMuteFrame(SystemFrame):
 
     mute: bool
 
+@dataclass
+class STTRestartFrame(SystemFrame):
+    """System frame to restart the STT service."""
+    pass
+
+
 
 @dataclass
 class TransportMessageUrgentFrame(SystemFrame):
@@ -861,3 +867,9 @@ class MixerEnableFrame(MixerControlFrame):
     """Control frame to enable or disable the mixer at runtime."""
 
     enable: bool
+
+@dataclass
+class LLMMessagesAppendAndProcessFrame(ControlFrame):
+    """Control frame to force an assistant response without an existing transcript."""
+
+    pass

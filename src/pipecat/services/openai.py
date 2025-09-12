@@ -136,6 +136,22 @@ class BaseOpenAILLMService(LLMService):
         self._client = self.create_client(
             api_key=api_key, base_url=base_url, organization=organization, project=project, **kwargs
         )
+        self._completion_durations = []  # List to store elapsed completion times
+
+    def get_completion_durations(self) -> List[float]:
+            """Get the list of completion durations."""
+            return self._completion_durations.copy()
+        
+    def get_average_completion_duration(self) -> float:
+        """Get the average completion duration."""
+        if not self._completion_durations:
+            return 0.0
+        return sum(self._completion_durations) / len(self._completion_durations)
+
+    def clear_completion_durations(self):
+        """Clear the list of completion durations."""
+        self._completion_durations.clear()
+
 
     def create_client(self, api_key=None, base_url=None, organization=None, project=None, **kwargs):
         return AsyncOpenAI(
@@ -180,7 +196,6 @@ class BaseOpenAILLMService(LLMService):
     async def _stream_chat_completions(
         self, context: OpenAILLMContext
     ) -> AsyncStream[ChatCompletionChunk]:
-        start_time = time.perf_counter()
         logger.debug(f"{self}: Generating chat [{context.get_messages_for_logging()}]")
 
         messages: List[ChatCompletionMessageParam] = context.get_messages()
@@ -202,14 +217,13 @@ class BaseOpenAILLMService(LLMService):
 
         chunks = await self.get_chat_completions(context, messages)
         
-        elapsed = time.perf_counter() - start_time
-        elapsed_formatted = round(elapsed, 3)
-        logger.debug(f"Openai completion duration: {elapsed_formatted}")
         logger.debug(f"{self}: Got chat completions")
 
         return chunks
 
     async def _process_context(self, context: OpenAILLMContext):
+        start_time = time.perf_counter()  # Start timing the completion
+        
         functions_list = []
         arguments_list = []
         tool_id_list = []
@@ -304,6 +318,12 @@ class BaseOpenAILLMService(LLMService):
                     )
 
         logger.debug(f"{self}: Finished processing function calls")
+        
+        # Calculate and store completion duration
+        elapsed = time.perf_counter() - start_time
+        elapsed_formatted = round(elapsed, 3)
+        self._completion_durations.append(elapsed_formatted)  # Store the duration
+        logger.debug(f"OpenAI completion duration: {elapsed_formatted}")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -736,3 +756,6 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
 
         except Exception as e:
             logger.error(f"Error processing frame: {e}")
+
+
+    

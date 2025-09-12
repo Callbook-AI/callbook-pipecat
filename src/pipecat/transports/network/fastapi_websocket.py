@@ -61,6 +61,8 @@ class FastAPIWebsocketClient:
         self._closing = False
         self._is_binary = is_binary
         self._callbacks = callbacks
+        self._disconnect_lock = asyncio.Lock()
+        self._is_disconnecting = False
 
     def receive(self) -> typing.AsyncIterator[bytes | str]:
         return self._websocket.iter_bytes() if self._is_binary else self._websocket.iter_text()
@@ -73,10 +75,13 @@ class FastAPIWebsocketClient:
                 await self._websocket.send_text(data)
 
     async def disconnect(self):
-        if self.is_connected and not self.is_closing:
-            self._closing = True
+        if self._is_disconnecting: 
+            return
+
+        self._is_disconnecting = True 
+        if self._websocket.client_state == WebSocketState.CONNECTED:
+            logger.debug("Closing client websocket")
             await self._websocket.close()
-            await self.trigger_client_disconnected()
 
     async def trigger_client_disconnected(self):
         await self._callbacks.on_client_disconnected(self._websocket)
@@ -299,6 +304,8 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
 
     async def _write_frame(self, frame: Frame):
         try:
+            if hasattr(frame, 'audio') and self._final_audio_buffer is not None:
+                self._final_audio_buffer.extend(frame.audio)
             payload = await self._params.serializer.serialize(frame)
             if payload:
                 await self._client.send(payload)

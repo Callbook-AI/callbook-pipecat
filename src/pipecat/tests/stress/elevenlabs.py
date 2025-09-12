@@ -1,55 +1,38 @@
-#
-# Copyright (c) 2024–2025, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
 
+import time
 import asyncio
-import base64
+import statistics
+import uuid
 import json
-from typing import Any, AsyncGenerator, Dict, List, Literal, Mapping, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional, Tuple, Union
 
-import aiohttp
 from loguru import logger
 from pydantic import BaseModel, model_validator
 
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
-    ErrorFrame,
     Frame,
     StartFrame,
     StartInterruptionFrame,
-    TTSAudioRawFrame,
-    TTSStartedFrame,
     TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_services import InterruptibleWordTTSService, TTSService
 from pipecat.transcriptions.language import Language
+from pipecat.utils.asyncio import TaskManager
+from pipecat.clocks.system_clock import SystemClock
+from pathlib import Path
 
-# See .env.example for ElevenLabs configuration needed
-try:
-    import websockets
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
-    logger.error(
-        "In order to use ElevenLabs, you need to `pip install pipecat-ai[elevenlabs]`. Also, set `ELEVENLABS_API_KEY` environment variable."
-    )
-    raise Exception(f"Missing module: {e}")
 
-ElevenLabsOutputFormat = Literal["pcm_16000", "pcm_22050", "pcm_24000", "pcm_44100"]
 
-# Models that support language codes
-# The following models are excluded as they don't support language codes:
-# - eleven_flash_v2
-# - eleven_turbo_v2
-# - eleven_multilingual_v2
+import websockets
+
+
 ELEVENLABS_MULTILINGUAL_MODELS = {
     "eleven_flash_v2_5",
     "eleven_turbo_v2_5",
 }
-
 
 def language_to_elevenlabs_language(language: Language) -> Optional[str]:
     BASE_LANGUAGES = {
@@ -154,25 +137,11 @@ def build_elevenlabs_voice_settings(
     return voice_settings or None
 
 
-def calculate_word_times(
-    alignment_info: Mapping[str, Any], cumulative_time: float
-) -> List[Tuple[str, float]]:
-    zipped_times = list(zip(alignment_info["chars"], alignment_info["charStartTimesMs"]))
 
-    words = "".join(alignment_info["chars"]).split(" ")
-
-    # Calculate start time for each word. We do this by finding a space character
-    # and using the previous word time, also taking into account there might not
-    # be a space at the end.
-    times = []
-    for i, (a, b) in enumerate(zipped_times):
-        if a == " " or i == len(zipped_times) - 1:
-            t = cumulative_time + (zipped_times[i - 1][1] / 1000.0)
-            times.append(t)
-
-    word_times = list(zip(words, times))
-
-    return word_times
+# ── global helpers ────────────────────────────────────────────────────
+LOG_FILE   = Path("received_messages.jsonl")              # all messages land here
+ERROR_LOCK = asyncio.Lock()                               # protects the counter
+ERRORS     = 0                                            # global error counter
 
 
 class ElevenLabsTTSService(InterruptibleWordTTSService):
@@ -205,6 +174,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         url: str = "wss://api.elevenlabs.io",
         sample_rate: Optional[int] = None,
         params: InputParams = InputParams(),
+        callback,
         **kwargs,
     ):
         # Aggregating sentences still gives cleaner-sounding results and fewer
@@ -257,6 +227,11 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         self._receive_task = None
         self._keepalive_task = None
 
+        self._callback = callback                   # store the callback
+        self._send_ts: Optional[float] = None       # when we last sent text
+        self._ttfb_reported = False                 # guard so we report only once
+        self._instance_id = uuid.uuid4().hex 
+
     def can_generate_metrics(self) -> bool:
         return True
 
@@ -293,23 +268,10 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         await super().cancel(frame)
         await self._disconnect()
 
-    
     async def flush_audio(self):
-        ws = getattr(self, "_websocket", None)
-        if ws is None or getattr(ws, "closed", True) or not getattr(ws, "open", False):
-            return
-
-        msg = {"text": " ", "flush": True}
-        try:
-            await ws.send(json.dumps(msg))
-        except websockets.ConnectionClosedOK:
-            logger.debug(f"{self} flush_audio skipped – websocket closed (OK).")
-        except websockets.ConnectionClosedError as e:
-            logger.debug(f"{self} flush_audio skipped – connection closed: {e}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.debug(f"{self} flush_audio skipped – unexpected error: {e}")
+        if self._websocket:
+            msg = {"text": " ", "flush": True}
+            await self._websocket.send(json.dumps(msg))
     
     
     async def flush_audio_to_ignore(self):
@@ -330,10 +292,12 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
 
     async def _connect(self):
+        logger.debug("CONNECTING")
         await self._connect_websocket()
 
         if not self._receive_task:
             self._receive_task = self.create_task(self._receive_task_handler(self.push_error))
+
 
         if not self._keepalive_task:
             self._keepalive_task = self.create_monitored_task(self._keepalive_task_handler)
@@ -384,9 +348,8 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             }
             if self._voice_settings:
                 msg["voice_settings"] = self._voice_settings
-            logger.debug(msg["voice_settings"])
-            
             await self._websocket.send(json.dumps(msg))
+            logger.debug("Connected")
         except Exception as e:
             logger.error(f"{self} initialization error: {e}")
             self._websocket = None
@@ -410,26 +373,35 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             return self._websocket
         raise Exception("Websocket not connected")
 
+    # replace the old _receive_messages with the one below
     async def _receive_messages(self):
-        async for message in self._get_websocket():
+        global ERRORS
+        """Receive every websocket message, log it, and count errors."""
+        async for raw in self._get_websocket():
+
+            # existing TTFB logic -------------------------------------------------
+            if self._send_ts and not self._ttfb_reported:
+                ttfb = time.perf_counter() - self._send_ts
+                self._callback(ttfb)
+                self._ttfb_reported = True
+
+            # 1️⃣  persist the raw JSON line-by-line
+            LOG_FILE.parent.mkdir(exist_ok=True)
+            with LOG_FILE.open("a", encoding="utf-8") as fh:
+                fh.write(raw)
+                fh.write("\n")
+                
+            try:
+                payload = json.loads(raw)
+                if "audio" not in payload:
+                    async with ERROR_LOCK:
+                        ERRORS += 1
+            except json.JSONDecodeError:
+                async with ERROR_LOCK:
+                    ERRORS += 1
+
             
-            if not self._started: 
-                logger.debug("Ignoring message, not started")
-                continue
-
-            msg = json.loads(message)
-            if msg.get("audio"):
-                await self.stop_ttfb_metrics()
-                self.start_word_timestamps()
-
-                audio = base64.b64decode(msg["audio"])
-                frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
-                await self.push_frame(frame)
-            if msg.get("alignment"):
-                logger.debug(f"Received message from Elevenlabs: {''.join(msg['alignment'].get('chars'))}")
-                word_times = calculate_word_times(msg["alignment"], self._cumulative_time)
-                await self.add_word_timestamps(word_times)
-                self._cumulative_time = word_times[-1][1]
+            
 
     async def _keepalive_task_handler(self, task_name):
         while True:
@@ -442,11 +414,14 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 logger.warning(f"{self} keepalive error: {e}")
                 break
 
+
     async def _send_text(self, text: str):
         if self._websocket:
+            self._send_ts = time.perf_counter()
+            self._ttfb_reported = False
             msg = {"text": text + " "}
-            logger.debug(f"{self}::Sending websocket msg: { msg }")
             await self._websocket.send(json.dumps(msg))
+            logger.debug("message sent")
 
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         logger.debug(f"{self}: Generating TTS [{text}]")
@@ -456,161 +431,84 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 await self._connect()
 
             try:
-                if not self._started:
-                    await self.start_ttfb_metrics()
-                    yield TTSStartedFrame()
-                    self._started = True
-                    self._cumulative_time = 0
-
+                logger.debug("sending text")
                 await self._send_text(text)
-                await self.start_tts_usage_metrics(text)
             except Exception as e:
-                logger.error(f"{self} error sending message: {e}")
-                yield TTSStoppedFrame()
+                logger.debug(f"{self} error sending message: {e}")
                 await self._disconnect()
                 await self._connect()
                 return
-            yield None
         except Exception as e:
             logger.error(f"{self} exception: {e}")
 
+ELEVEN_LABS_API_KEY = ''
+voice_id = ''
 
-class ElevenLabsHttpTTSService(TTSService):
-    """ElevenLabs Text-to-Speech service using HTTP streaming.
 
-    Args:
-        api_key: ElevenLabs API key
-        voice_id: ID of the voice to use
-        aiohttp_session: aiohttp ClientSession
-        model: Model ID (default: "eleven_flash_v2_5" for low latency)
-        base_url: API base URL
-        sample_rate: Output sample rate
-        params: Additional parameters for voice configuration
-    """
 
-    class InputParams(BaseModel):
-        language: Optional[Language] = None
-        optimize_streaming_latency: Optional[int] = None
-        stability: Optional[float] = None
-        similarity_boost: Optional[float] = None
-        style: Optional[float] = None
-        use_speaker_boost: Optional[bool] = None
-        speed: Optional[float] = None
 
-    def __init__(
-        self,
-        *,
-        api_key: str,
-        voice_id: str,
-        aiohttp_session: aiohttp.ClientSession,
-        model: str = "eleven_flash_v2_5",
-        base_url: str = "https://api.elevenlabs.io",
-        sample_rate: Optional[int] = None,
-        params: InputParams = InputParams(),
-        **kwargs,
-    ):
-        super().__init__(sample_rate=sample_rate, **kwargs)
+# ── keep your existing imports / ElevenLabsTTSService definition here ──
 
-        self._api_key = api_key
-        self._base_url = base_url
-        self._params = params
-        self._session = aiohttp_session
+def _percentile(data: List[float], pct: float) -> float:
+    """Return the given percentile (e.g. 95 for p95)."""
+    if not data:
+        return float("nan")
+    k = max(0, min(len(data) - 1, int(round((pct / 100) * len(data) + 0.5)) - 1))
+    return sorted(data)[k]
 
-        self._settings = {
-            "language": self.language_to_service_language(params.language)
-            if params.language
-            else None,
-            "optimize_streaming_latency": params.optimize_streaming_latency,
-            "stability": params.stability,
-            "similarity_boost": params.similarity_boost,
-            "style": params.style,
-            "use_speaker_boost": params.use_speaker_boost,
-            "speed": params.speed,
-        }
-        self.set_model_name(model)
-        self.set_voice(voice_id)
-        self._output_format = ""  # initialized in start()
-        self._voice_settings = self._set_voice_settings()
+async def time_response(text: str) -> float:
+    """Run one TTS request and return the TTFB (ms)."""
+    ttfb_holder: List[float] = []
 
-    def can_generate_metrics(self) -> bool:
-        return True
+    # closure to grab the measurement instead of printing it
+    def collect_ttfb(ttfb_sec: float):
+        ttfb_holder.append(ttfb_sec * 1_000)  # convert → ms
 
-    def _set_voice_settings(self):
-        return build_elevenlabs_voice_settings(self._settings)
+    eleven = ElevenLabsTTSService(
+        api_key=ELEVEN_LABS_API_KEY,
+        voice_id=voice_id,
+        params=ElevenLabsTTSService.InputParams(
+            similarity_boost=0.75,
+            stability=0.5,
+            speed=1,
+            language=Language.ES,
+            auto_mode=False,
+        ),
+        callback=collect_ttfb,
+    )
 
-    async def start(self, frame: StartFrame):
-        await super().start(frame)
-        self._output_format = output_format_from_sample_rate(self.sample_rate)
+    clock = SystemClock()
+    task_manager = TaskManager()
+    task_manager.set_event_loop(asyncio.get_running_loop())
 
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
-        """Generate speech from text using ElevenLabs streaming API.
+    await eleven.process_frame(StartFrame(clock=clock, task_manager=task_manager),
+                               direction=FrameDirection.UPSTREAM)
+    await asyncio.sleep(1)                 # keep loop alive long enough to receive
+    await eleven.run_tts(text)             # _send_text() starts the timer
+    await eleven.flush_audio()
+    await asyncio.sleep(4)                 # wait for audio + callback
+    await eleven.stop(EndFrame())
 
-        Args:
-            text: The text to convert to speech
+    return ttfb_holder[0] if ttfb_holder else float("nan")
 
-        Yields:
-            Frames containing audio data and status information
-        """
-        logger.debug(f"{self}: Generating TTS [{text}]")
+async def run_benchmark(concurrency: int = 300, text: str = "Hola, ¿cómo estás?"):
+    # launch N coroutines at once
+    tasks = [asyncio.create_task(time_response(text)) for _ in range(concurrency)]
+    results_ms = await asyncio.gather(*tasks)
 
-        url = f"{self._base_url}/v1/text-to-speech/{self._voice_id}/stream"
+    # drop failed runs (NaN) if any
+    latencies = [v for v in results_ms if v == v]
 
-        payload: Dict[str, Union[str, Dict[str, Union[float, bool]]]] = {
-            "text": text,
-            "model_id": self._model_name,
-        }
+    print("Runs:        ", len(latencies))
+    print("Errors:      ", ERRORS)
+    print("\n— Latency results (ms) —")
+    print("Min:         ", f"{min(latencies):.2f}")
+    print("Max:         ", f"{max(latencies):.2f}")
+    print("Mean:        ", f"{statistics.mean(latencies):.2f}")
+    print("Median:      ", f"{statistics.median(latencies):.2f}")
+    print("Std dev:     ", f"{statistics.stdev(latencies):.2f}" if len(latencies) > 1 else "n/a")
+    print("95th pct:    ", f"{_percentile(latencies, 95):.2f}")
+    print("99th pct:    ", f"{_percentile(latencies, 99):.2f}")
 
-        if self._voice_settings:
-            payload["voice_settings"] = self._voice_settings
-
-        language = self._settings["language"]
-        if self._model_name in ELEVENLABS_MULTILINGUAL_MODELS and language:
-            payload["language_code"] = language
-            logger.debug(f"Using language code: {language}")
-        elif language:
-            logger.warning(
-                f"Language code [{language}] not applied. Language codes can only be used with multilingual models: {', '.join(sorted(ELEVENLABS_MULTILINGUAL_MODELS))}"
-            )
-
-        headers = {
-            "xi-api-key": self._api_key,
-            "Content-Type": "application/json",
-        }
-
-        # Build query parameters
-        params = {
-            "output_format": self._output_format,
-        }
-        if self._settings["optimize_streaming_latency"] is not None:
-            params["optimize_streaming_latency"] = self._settings["optimize_streaming_latency"]
-
-        logger.debug(f"ElevenLabs request - payload: {payload}, params: {params}")
-
-        try:
-            await self.start_ttfb_metrics()
-
-            async with self._session.post(
-                url, json=payload, headers=headers, params=params
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"{self} error: {error_text}")
-                    yield ErrorFrame(error=f"ElevenLabs API error: {error_text}")
-                    return
-
-                await self.start_tts_usage_metrics(text)
-
-                # Process the streaming response
-                CHUNK_SIZE = 1024
-
-                yield TTSStartedFrame()
-                async for chunk in response.content.iter_chunked(CHUNK_SIZE):
-                    if len(chunk) > 0:
-                        await self.stop_ttfb_metrics()
-                        yield TTSAudioRawFrame(chunk, self.sample_rate, 1)
-        except Exception as e:
-            logger.error(f"Error in run_tts: {e}")
-            yield ErrorFrame(error=str(e))
-        finally:
-            await self.stop_ttfb_metrics()
-            yield TTSStoppedFrame()
+if __name__ == "__main__":
+    asyncio.run(run_benchmark())

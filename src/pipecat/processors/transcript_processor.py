@@ -186,6 +186,7 @@ class TranscriptProcessor:
         self._user_processor = None
         self._assistant_processor = None
         self._event_handlers = {}
+        self.manage_voicemail_message = False
 
     def user(self, **kwargs) -> UserTranscriptProcessor:
         """Get the user transcript processor.

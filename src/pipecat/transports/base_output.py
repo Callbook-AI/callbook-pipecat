@@ -72,6 +72,15 @@ class BaseOutputTransport(FrameProcessor):
         # Indicates if the bot is currently speaking.
         self._bot_speaking = False
 
+        self._debug = False
+        self._handle_audio_buffer = bytearray()
+        self._handle_audio_buffer_resampled = bytearray()
+        self._sink_queue_source_buffer = bytearray()
+        self._sink_queue_exit_buffer = bytearray()
+        self._mixed_buffer = bytearray()
+        self._writing_frame_buffer = bytearray()
+        self._final_audio_buffer = bytearray()
+        
     @property
     def sample_rate(self) -> int:
         return self._sample_rate
@@ -192,6 +201,9 @@ class BaseOutputTransport(FrameProcessor):
     async def _handle_audio(self, frame: OutputAudioRawFrame):
         if not self._params.audio_out_enabled:
             return
+        
+        if self._debug:
+            self._handle_audio_buffer.extend(frame.audio)
 
         # We might need to resample if incoming audio doesn't match the
         # transport sample rate.
@@ -199,16 +211,23 @@ class BaseOutputTransport(FrameProcessor):
             frame.audio, frame.sample_rate, self._sample_rate
         )
 
+    
+
         cls = type(frame)
-        self._audio_buffer.extend(resampled)
-        while len(self._audio_buffer) >= self._audio_chunk_size:
+        audio_buffer = bytearray(resampled)
+
+        if self._debug:
+            self._handle_audio_buffer_resampled.extend(audio_buffer)
+
+        while len(audio_buffer) >= self._audio_chunk_size:
             chunk = cls(
-                bytes(self._audio_buffer[: self._audio_chunk_size]),
+                bytes(audio_buffer[: self._audio_chunk_size]),
                 sample_rate=self._sample_rate,
                 num_channels=frame.num_channels,
             )
-            await self._sink_queue.put(chunk)
-            self._audio_buffer = self._audio_buffer[self._audio_chunk_size :]
+            self._sink_queue_source_buffer.extend(audio_buffer[:self._audio_chunk_size])
+            self._sink_queue.put_nowait(chunk)
+            audio_buffer = audio_buffer[self._audio_chunk_size:]
 
     async def _handle_image(self, frame: OutputImageRawFrame | SpriteFrame):
         if not self._params.camera_out_enabled:
@@ -318,18 +337,31 @@ class BaseOutputTransport(FrameProcessor):
             while True:
                 try:
                     frame = self._sink_queue.get_nowait()
-                    if isinstance(frame, OutputAudioRawFrame):
-                        frame.audio = await self._params.audio_out_mixer.mix(frame.audio)
+
                     last_frame_time = time.time()
-                    yield frame
+
+                    if isinstance(frame, OutputAudioRawFrame):
+                        self._sink_queue_exit_buffer.extend(frame.audio)
+                        mixed_audio = await self._params.audio_out_mixer.mix(frame.audio)
+                        self._mixed_buffer.extend(mixed_audio)
+                        
+                        new_frame = frame.__class__(
+                            audio=mixed_audio,
+                            sample_rate=frame.sample_rate,
+                            num_channels=frame.num_channels,
+                        )
+                        yield new_frame
+                    else:
+                        yield frame
+
                 except asyncio.QueueEmpty:
-                    # Notify the bot stopped speaking upstream if necessary.
                     diff_time = time.time() - last_frame_time
                     if diff_time > vad_stop_secs:
                         await self._bot_stopped_speaking()
-                    # Generate an audio frame with only the mixer's part.
+
+                    mixed_silence = await self._params.audio_out_mixer.mix(silence)
                     frame = OutputAudioRawFrame(
-                        audio=await self._params.audio_out_mixer.mix(silence),
+                        audio=mixed_silence,
                         sample_rate=self._sample_rate,
                         num_channels=self._params.audio_out_channels,
                     )
@@ -366,6 +398,7 @@ class BaseOutputTransport(FrameProcessor):
 
             # Send audio.
             if isinstance(frame, OutputAudioRawFrame):
+                self._writing_frame_buffer.extend(frame.audio)
                 await self.write_raw_audio_frames(frame.audio)
 
     #
