@@ -592,15 +592,16 @@ class GladiaSTTService(STTService):
         self._handle_first_message(frame.text)
         self._was_first_transcript_receipt = True
         
+        # Optimized flow for immediate processing
         if not self._user_speaking:
             await self._handle_user_speaking()
-            await asyncio.sleep(0.001)
         
+        # Push frame immediately without delays
         await self.push_frame(frame)
         
         self._last_time_transcription = time.time()
         
-        await asyncio.sleep(0.001)
+        # Handle user silence immediately for faster aggregation
         await self._handle_user_silence()
         
         await self.stop_processing_metrics()
@@ -624,12 +625,13 @@ class GladiaSTTService(STTService):
         word_count = self._transcript_words_count(transcript)
         self._streaming_word_count = word_count
         
-        # For longer interim results, start accumulating for faster final processing
-        if word_count >= 3:  # Start accumulating multi-word interim results
-            frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
+        # For longer interim results, prepare for faster final processing
+        if word_count >= 2:  # Start preparing for multi-word interim results
+            # Send a simulated final frame to trigger early LLM preparation
+            prep_frame = TranscriptionFrame(transcript, "", time_now_iso8601(), language)
             if self._is_accum_transcription(transcript):
-                self._append_accum_transcription(frame)
-                logger.debug(f"Accumulated interim transcript for streaming: {transcript}")
+                self._append_accum_transcription(prep_frame)
+                logger.debug(f"Prepared interim transcript for fast processing: {transcript}")
         
         logger.debug(f"📢 Interim sent: '{transcript}' (words: {word_count})")
 
