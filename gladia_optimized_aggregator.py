@@ -183,9 +183,10 @@ class GladiaOptimizedAssistantContextAggregator(LLMAssistantContextAggregator):
         context: OpenAILLMContext,
         min_chars_for_streaming: int = 20,  # Start TTS after 20 characters
         streaming_enabled: bool = True,
+        expect_stripped_words: bool = True,  # Add expect_stripped_words parameter
         **kwargs,
     ):
-        super().__init__(context=context, **kwargs)
+        super().__init__(context=context, expect_stripped_words=expect_stripped_words, **kwargs)
         
         self._min_chars_for_streaming = min_chars_for_streaming
         self._streaming_enabled = streaming_enabled
@@ -246,12 +247,32 @@ class GladiaOptimizedAssistantContextAggregator(LLMAssistantContextAggregator):
         await super()._handle_llm_end(frame)
 
 
+class GladiaOptimizedAggregatorPair:
+    """
+    Aggregator pair that mimics the structure expected by the Pipecat pipeline.
+    This allows the optimized aggregators to be used as a drop-in replacement
+    for the standard OpenAI aggregator pair.
+    """
+    
+    def __init__(self, user_aggregator, assistant_aggregator):
+        self._user_aggregator = user_aggregator
+        self._assistant_aggregator = assistant_aggregator
+    
+    def user(self):
+        """Return the user context aggregator."""
+        return self._user_aggregator
+    
+    def assistant(self):
+        """Return the assistant context aggregator."""
+        return self._assistant_aggregator
+
+
 def create_gladia_optimized_aggregators(context: OpenAILLMContext, **kwargs):
     """
     Factory function to create optimized aggregators for Gladia STT service.
     
     Returns:
-        tuple: (user_aggregator, assistant_aggregator)
+        GladiaOptimizedAggregatorPair: An aggregator pair compatible with Pipecat pipeline
     """
     user_aggregator = GladiaOptimizedUserContextAggregator(
         context=context,
@@ -263,4 +284,4 @@ def create_gladia_optimized_aggregators(context: OpenAILLMContext, **kwargs):
         **kwargs.get('assistant_kwargs', {})
     )
     
-    return user_aggregator, assistant_aggregator
+    return GladiaOptimizedAggregatorPair(user_aggregator, assistant_aggregator)
