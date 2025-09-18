@@ -90,12 +90,12 @@ def get_stt_service(call):
     deepgram_key = instance.INSTANCE.get("deepgram_key")
     backup_deepgram_keys = instance.INSTANCE.get("backup_deepgram_keys", [])
 
-    
+    stt_provider = "gladia"
     if stt_provider == 'gladia':
         stt = GladiaSTTService(
             api_key=GLADIA_API_KEY,
-            confidence=0.1,  # Reduced from 0.99 to be more responsive to actual speech
-            on_no_punctuation_seconds=0.3,  # Much faster timeout for immediate response
+            confidence=0.3,  # Reduced from 0.99 to be more responsive to actual speech
+            on_no_punctuation_seconds=0.5,  # Much faster timeout for immediate response
             params=GladiaSTTService.InputParams(
                 language=language,
                 allow_interruptions=allow_interruptions,
@@ -103,7 +103,7 @@ def get_stt_service(call):
                 detect_voicemail=should_detect_voicemail,
                 region="us-east",
                 endpointing=0.05,           # Very aggressive endpointing for fastest response
-                maximum_duration_without_endpointing=3,  # Shorter timeout
+                maximum_duration_without_endpointing=6,  # Shorter timeout
                 speech_threshold=0.2,       # Lower threshold for faster detection
                 audio_enhancer=False,       # Disable for speed
                 code_switching=True,
@@ -204,11 +204,12 @@ def get_pipeline_items(call, manage_voicemail_message: bool = False):
 
     # Check if we're using Gladia STT for optimization
     stt_provider = call['transcriber'].get('provider', 'deepgram')
+    stt_provider = "gladia"  # Force to gladia for testing - should match get_stt_service()
     
     if stt_provider == 'gladia':
         # Use optimized aggregators for Gladia
-        logger.debug("Using Gladia-optimized aggregators")
-        user_aggregator, assistant_aggregator = create_gladia_optimized_aggregators(
+        logger.info("🚀 Using Gladia-optimized aggregators for improved performance")
+        llm_context_aggregator = create_gladia_optimized_aggregators(
             llm_context,
             user_kwargs={
                 'aggregation_timeout': 0.05,  # Very fast aggregation
@@ -221,16 +222,10 @@ def get_pipeline_items(call, manage_voicemail_message: bool = False):
                 'streaming_enabled': True
             }
         )
-        
-        # Create aggregator pair object
-        class OptimizedAggregatorPair:
-            def __init__(self, user, assistant):
-                self.user = lambda: user
-                self.assistant = lambda: assistant
-        
-        llm_context_aggregator = OptimizedAggregatorPair(user_aggregator, assistant_aggregator)
+        logger.info("✅ Gladia-optimized aggregators created successfully")
     else:
         # Use standard aggregators for Deepgram/Dual
+        logger.info("📝 Using standard aggregators for Deepgram/Dual")
         llm_context_aggregator = llm.create_context_aggregator(
             llm_context,
             assistant_kwargs={"expect_stripped_words": True},

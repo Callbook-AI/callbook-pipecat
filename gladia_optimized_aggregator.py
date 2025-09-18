@@ -85,7 +85,7 @@ class GladiaOptimizedUserContextAggregator(LLMUserContextAggregator):
         if not text:
             return
             
-        logger.debug(f"GladiaOptimized: Processing final transcript: '{text}'")
+        logger.info(f"🎯 GladiaOptimized: Processing final transcript: '{text}'")
         
         # Store the transcription
         self._aggregation += f" {text}" if self._aggregation else text
@@ -93,7 +93,7 @@ class GladiaOptimizedUserContextAggregator(LLMUserContextAggregator):
         # For immediate mode, process right away
         if self._immediate_mode:
             # Simulate the interim experience by immediately pushing context
-            logger.debug("GladiaOptimized: Immediate mode - pushing aggregation immediately")
+            logger.info("⚡ GladiaOptimized: Immediate mode - pushing aggregation immediately")
             await self.push_aggregation()
             return
         
@@ -146,7 +146,7 @@ class GladiaOptimizedUserContextAggregator(LLMUserContextAggregator):
         if not self._aggregation.strip():
             return
             
-        logger.debug(f"GladiaOptimized: Pushing aggregation: '{self._aggregation}'")
+        logger.info(f"🚀 GladiaOptimized: Pushing aggregation to LLM: '{self._aggregation}'")
         
         # Add message to context
         self._context.add_message({"role": self._role, "content": self._aggregation})
@@ -222,7 +222,7 @@ class GladiaOptimizedAssistantContextAggregator(LLMAssistantContextAggregator):
                 
                 if good_break_idx > 0:
                     text_to_stream = buffer_to_check[:good_break_idx]
-                    logger.debug(f"GladiaOptimized: Streaming text to TTS: '{text_to_stream}'")
+                    logger.info(f"🎵 GladiaOptimized: Streaming text to TTS early: '{text_to_stream}'")
                     
                     # Send text frame for TTS
                     await self.push_frame(TextFrame(text_to_stream))
