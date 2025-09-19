@@ -1429,7 +1429,6 @@ class DeepgramSTTService(STTService):
     
 
     async def _detect_and_handle_voicemail(self, transcript: str):
-        if not self.detect_voicemail:  return False
 
         if not self.detect_voicemail: return False
 
@@ -1444,12 +1443,14 @@ class DeepgramSTTService(STTService):
         logger.debug("Voicemail detected")
 
         await self.push_frame(
+            TranscriptionFrame(transcript, "", time_now_iso8601(), self.language)
+        )
+
+        await self.push_frame(
             VoicemailFrame(transcript)
         )
 
         logger.debug("Voicemail pushed")
-        return True
-
         return True
 
 
