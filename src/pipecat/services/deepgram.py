@@ -1614,6 +1614,13 @@ class DeepgramSTTService(STTService):
             logger.debug("🎤 DeepgramSTTService: VAD inactive")
             self._vad_active = False
             
+
+            if self._accum_transcription_frames and len(self._accum_transcription_frames) > 0:
+                last_transcript = self._accum_transcription_frames[-1].text.strip()
+                if last_transcript and last_transcript.endswith(','):
+                    logger.debug("🎤 DeepgramSTTService: VAD inactive with comma ending - sending accumulated transcriptions for improved latency")
+                    await self._send_accum_transcriptions()
+            
             # Update backup system with VAD inactive time for filtering
             if self._intelligent_gladia_backup:
                 await self._intelligent_gladia_backup.update_vad_inactive_time()
