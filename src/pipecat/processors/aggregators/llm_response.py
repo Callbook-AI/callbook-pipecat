@@ -31,7 +31,8 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
-    LLMMessagesAppendAndProcessFrame
+    LLMMessagesAppendAndProcessFrame,
+    LLMMessagesAppendFunctionToAssistantContext
 )
 from pipecat.processors.aggregators.openai_llm_context import (
     OpenAILLMContext,
@@ -507,6 +508,11 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             self.set_messages(frame.messages)
         elif isinstance(frame, LLMSetToolsFrame):
             self.set_tools(frame.tools)
+        elif isinstance(frame, LLMMessagesAppendFunctionToAssistantContext):
+            logger.debug(f"current aggregation before appending function: '{self._aggregation}'")
+            self._aggregation += f" {frame.function}" if self._aggregation else frame.function
+            logger.debug(f"new aggregation after appending function: '{self._aggregation}'")
+            await self.push_aggregation()
         else:
             await self.push_frame(frame, direction)
 

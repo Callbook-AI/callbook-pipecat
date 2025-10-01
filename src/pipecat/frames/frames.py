@@ -873,3 +873,9 @@ class LLMMessagesAppendAndProcessFrame(ControlFrame):
     """Control frame to force an assistant response without an existing transcript."""
 
     pass
+
+@dataclass
+class LLMMessagesAppendFunctionToAssistantContext(ControlFrame):
+    """Control frame to force an assistant response without an existing transcript."""
+
+    function: str
