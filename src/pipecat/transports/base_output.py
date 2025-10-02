@@ -80,6 +80,7 @@ class BaseOutputTransport(FrameProcessor):
         self._mixed_buffer = bytearray()
         self._writing_frame_buffer = bytearray()
         self._final_audio_buffer = bytearray()
+        self._user_buffer = bytearray()
         
     @property
     def sample_rate(self) -> int:
