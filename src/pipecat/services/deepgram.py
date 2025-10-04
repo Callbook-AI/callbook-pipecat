@@ -685,6 +685,7 @@ class DeepgramSTTService(STTService):
         self._addons = addons
         self._user_speaking = False
         self._bot_speaking = True
+        self._bot_has_ever_spoken = False  # Track if bot has spoken at least once
         self._bot_started_speaking_time = None  # Track when bot started speaking
         self._on_no_punctuation_seconds = on_no_punctuation_seconds
         self._vad_active = False
@@ -1200,6 +1201,7 @@ class DeepgramSTTService(STTService):
 
     async def _handle_bot_speaking(self):
         self._bot_speaking = True
+        self._bot_has_ever_spoken = True  # Mark that bot has spoken at least once
         self._bot_started_speaking_time = time.time()  # Track when bot started speaking
         logger.debug(f"🤖 DeepgramSTTService: Bot started speaking at {self._bot_started_speaking_time}")
 
@@ -1212,6 +1214,33 @@ class DeepgramSTTService(STTService):
 
     def _transcript_words_count(self, transcript: str):
         return len(transcript.split(" "))
+
+    def _should_ignore_fast_greeting(self, transcript: str, time_start: float) -> bool:
+        """
+        Check if a fast greeting (single word, early timing) should be ignored.
+
+        Rules:
+        - If bot is speaking: ignore
+        - If bot hasn't spoken yet: ignore
+        - If bot has spoken at least once: allow (return False)
+        """
+        # Only applies to single-word transcripts within first second
+        if time_start >= 1 or self._transcript_words_count(transcript) != 1:
+            return False
+
+        # Ignore if bot is currently speaking
+        if self._bot_speaking:
+            logger.debug("Ignoring fast greeting - bot is speaking")
+            return True
+
+        # Ignore if bot hasn't spoken yet (prevents false early detections)
+        if not self._bot_has_ever_spoken:
+            logger.debug("Ignoring fast greeting - bot hasn't spoken yet")
+            return True
+
+        # Allow if bot has spoken at least once (user responding)
+        logger.debug("Accepting fast greeting - bot has spoken at least once")
+        return False
 
     async def _async_handle_accum_transcription(self, current_time):
 
@@ -1380,8 +1409,8 @@ class DeepgramSTTService(STTService):
             logger.debug("Ignoring iterim because low confidence")
             return True
 
-        if time_start < 1 and self._transcript_words_count(transcript) == 1:
-            logger.debug("Ignoring first message, fast greeting")
+        # Check if fast greeting should be ignored
+        if self._should_ignore_fast_greeting(transcript, time_start):
             return True
         
         if self._should_ignore_first_repeated_message(transcript):
@@ -1455,83 +1484,112 @@ class DeepgramSTTService(STTService):
 
 
     async def _on_message(self, *args, **kwargs):
-        if not self._restarted: 
+        """Handle incoming transcription message from Deepgram or backup service."""
+        if not self._restarted:
             return
-            
+
         backup_source = kwargs.pop('backup_source', False)
-        
+
         try:
             result: LiveResultResponse = kwargs["result"]
-            
-            if len(result.channel.alternatives) == 0:
+
+            # Early return if no alternatives
+            if not result.channel.alternatives:
                 return
-            
-            is_final = result.is_final
-            speech_final = result.speech_final
-            transcript = result.channel.alternatives[0].transcript
-            confidence = result.channel.alternatives[0].confidence
-            start_time = result.start
-            
-            # Enhanced logging for debugging
-            if backup_source:
-                source_name = "� BACKUP ACTIVATED"
-            else:
-                source_name = "⚡ Deepgram Primary"
-                
-            transcript_type = "FINAL" if is_final else "INTERIM"
-            logger.info(f"{source_name}: 📋 {transcript_type} transcript received")
-            logger.info(f"   📝 Text: '{transcript}'")
-            logger.info(f"   🎯 Confidence: {confidence:.2f}")
-            logger.info(f"   ⏰ Start time: {start_time}")
-            logger.info(f"   🗣️ Speech final: {speech_final}")
-            
-            # Handle Deepgram finals - notify backup service (will be done in _process_final_transcript)
-            # Only log for debug purposes here
-            if is_final and not backup_source:
-                logger.debug(f"⚡ DeepgramSTTService: Deepgram final transcript: '{transcript}'")
-            
-            logger.debug(f"✅ DeepgramSTTService: Processing transcript from {source_name}")
+
+            # Log transcript receipt
+            self._log_transcript_receipt(result, backup_source)
+
+            # Process the transcript
             await self._process_transcript_message(result, backup_source)
-                
+
         except Exception as e:
             logger.exception(f"{self} unexpected error in _on_message: {e}")
 
+    def _log_transcript_receipt(self, result, backup_source):
+        """Log transcript receipt with source and metadata."""
+        alternative = result.channel.alternatives[0]
+        source_name = "BACKUP ACTIVATED" if backup_source else "Deepgram Primary"
+        transcript_type = "FINAL" if result.is_final else "INTERIM"
+
+        # Log single consolidated message
+        logger.info(
+            f"{source_name}: {transcript_type} transcript received - "
+            f"Text: '{alternative.transcript}', "
+            f"Confidence: {alternative.confidence:.2f}, "
+            f"Start: {result.start}, "
+            f"Speech final: {result.speech_final}"
+        )
+
+        if result.is_final and not backup_source:
+            logger.debug(f"DeepgramSTTService: Deepgram final transcript: '{alternative.transcript}'")
+
+
     async def _process_transcript_message(self, result, backup_source=False):
         """Process transcript message with backup source tracking."""
-        is_final = result.is_final
-        transcript = result.channel.alternatives[0].transcript
-        confidence = result.channel.alternatives[0].confidence
-        start_time = result.start
-        
-        language = None
-        if result.channel.alternatives[0].languages:
-            language = result.channel.alternatives[0].languages[0]
-            language = Language(language)
-        
-        if len(transcript) > 0:
-            source_detailed = "� Intelligent Backup" if backup_source else "⚡ Primary Deepgram"
-            logger.debug(f"📏 DeepgramSTTService: Non-empty transcript received from {source_detailed}")
-            await self.stop_ttfb_metrics()
+        alternative = result.channel.alternatives[0]
+        transcript = alternative.transcript
 
-            if await self._detect_and_handle_voicemail(transcript):
-                logger.info(f"📞 DeepgramSTTService: Voicemail detected and handled")
-                return 
-            
-            transcript_status = "FINAL" if is_final else "INTERIM"
-            logger.debug(f"{source_detailed}: Processing {transcript_status} - '{transcript}'")
-            logger.debug(f"   🎯 Confidence: {confidence:.2f}")
-            logger.debug(f"   ⏰ Start time: {start_time}")
-            
-            if await self._should_ignore_transcription(result, backup_source):
-                logger.debug(f"🚫 DeepgramSTTService: Transcript ignored by filter")
-                return
-            
-            if is_final:
-                logger.info(f"🎯 DeepgramSTTService: Processing FINAL transcript from {source_detailed}")
-                await self._process_final_transcript(result, backup_source)
-            else:
-                logger.debug(f"📢 DeepgramSTTService: Processing INTERIM transcript from {source_detailed}")
-                await self._on_interim_transcript_message(transcript, language, start_time)
+        # Guard: Empty transcript check
+        if not transcript:
+            return
+
+        # Stop TTFB metrics for non-empty transcripts
+        await self.stop_ttfb_metrics()
+
+        # Log transcript processing
+        self._log_transcript_processing(result, backup_source)
+
+        # Check voicemail detection
+        if await self._detect_and_handle_voicemail(transcript):
+            logger.info("DeepgramSTTService: Voicemail detected and handled")
+            return
+
+        # Check if transcription should be ignored
+        if await self._should_ignore_transcription(result, backup_source):
+            logger.debug("DeepgramSTTService: Transcript ignored by filter")
+            return
+
+        # Route to appropriate handler
+        if result.is_final:
+            await self._process_final_transcript(result, backup_source)
+        else:
+            await self._process_interim_transcript(result, backup_source)
+
+    def _log_transcript_processing(self, result, backup_source):
+        """Log transcript processing details."""
+        alternative = result.channel.alternatives[0]
+        source = "Intelligent Backup" if backup_source else "Primary Deepgram"
+        status = "FINAL" if result.is_final else "INTERIM"
+
+        # Log single consolidated message
+        logger.debug(
+            f"{source}: Processing {status} - "
+            f"Text: '{alternative.transcript}', "
+            f"Confidence: {alternative.confidence:.2f}, "
+            f"Start: {result.start}"
+        )
+
+    async def _process_interim_transcript(self, result, backup_source):
+        """Process interim transcript."""
+        alternative = result.channel.alternatives[0]
+        language = self._extract_language(alternative)
+
+        source = "Intelligent Backup" if backup_source else "Primary Deepgram"
+        logger.debug(f"DeepgramSTTService: Processing INTERIM transcript from {source}")
+
+        await self._on_interim_transcript_message(
+            alternative.transcript,
+            language,
+            result.start
+        )
+
+    def _extract_language(self, alternative):
+        """Extract language from alternative if available."""
+        if alternative.languages:
+            return Language(alternative.languages[0])
+        return None
+
 
     async def _process_final_transcript(self, result, backup_source=False):
         """Process final transcript with backup source tracking."""
