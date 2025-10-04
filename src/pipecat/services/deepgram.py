@@ -1344,11 +1344,16 @@ class DeepgramSTTService(STTService):
         if not self._fast_response: return
 
         if len(self._accum_transcription_frames) == 0: return
-        if self._vad_active: return
+
+        current_time = time.time()
+
+        if self._vad_active:
+            # Do not send if VAD is active and it's been less than 10 seconds since first message
+            if self._first_message_time and (current_time - self._first_message_time) > 10.0:
+                return
 
 
         last_message_time = max(self._last_interim_time, self._last_time_accum_transcription)
-        current_time = time.time()
 
         is_short_sentence = len(self._accum_transcription_frames) <= 2
         is_sentence_end = not self._is_accum_transcription(self._accum_transcription_frames[-1].text)
