@@ -95,12 +95,11 @@ class AssemblyAISTTService(STTService):
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
         
-        # Audio buffering - use 20ms chunks like Deepgram for maximum responsiveness
-        # While AssemblyAI docs say 50-1000ms, testing shows it works with smaller chunks
-        # and provides much better single-word detection
+        # Audio buffering - AssemblyAI strictly requires 50-1000ms chunks (enforced with error 3005)
+        # We use 50ms minimum for best responsiveness while meeting their requirements
         self._audio_buffer = bytearray()
-        self._min_buffer_size = int((sample_rate or 16000) * 2 * 0.02)  # 20ms of 16-bit audio (640 bytes @ 16kHz)
-        self._max_buffer_time = 0.02  # Force send after 20ms (match incoming audio chunks)
+        self._min_buffer_size = int((sample_rate or 16000) * 2 * 0.05)  # 50ms of 16-bit audio (1600 bytes @ 16kHz)
+        self._max_buffer_time = 0.05  # Force send after 50ms minimum
         self._last_send_time = time.time()
         
         logger.info(f"AssemblyAI STT Service initialized with language: {language}, sample_rate: {self._settings['sample_rate']}, speech_threshold: {speech_threshold}, allow_interruptions: {allow_interruptions}")
@@ -134,8 +133,9 @@ class AssemblyAISTTService(STTService):
 
         Streams audio data to AssemblyAI websocket for real-time transcription.
         
-        Uses minimal buffering (20ms chunks) following Deepgram's pattern for
-        maximum responsiveness to single words and quiet speech.
+        Uses 50ms buffering (AssemblyAI's strict minimum requirement).
+        
+        AssemblyAI enforces 50-1000ms chunks with error 3005 if violated.
 
         :param audio: Audio data as bytes (PCM 16-bit)
         :yield: None (transcription frames are pushed via callbacks)
@@ -148,8 +148,8 @@ class AssemblyAISTTService(STTService):
                 current_time = time.time()
                 time_since_last_send = current_time - self._last_send_time
                 
-                # Send with minimal buffering (20ms chunks) for best single-word detection
-                # This matches Deepgram's approach of sending every chunk immediately
+                # Send when we reach 50ms minimum (AssemblyAI's strict requirement)
+                # or when 50ms has elapsed since last send
                 should_send = (
                     len(self._audio_buffer) >= self._min_buffer_size or
                     (len(self._audio_buffer) > 0 and time_since_last_send >= self._max_buffer_time)
