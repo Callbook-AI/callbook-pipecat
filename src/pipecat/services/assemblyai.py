@@ -326,11 +326,12 @@ class AssemblyAISTTService(STTService):
                     await self._send_accum_transcriptions()
                     
                 else:
-                    # This is an interim transcript
+                    # This is an interim transcript - push immediately for low latency
                     logger.debug(f"{self}: INTERIM transcript: '{transcript}'")
                     
                     await self._handle_user_speaking()
                     
+                    # Create and push interim frame immediately (like Deepgram)
                     frame = InterimTranscriptionFrame(
                         transcript,
                         "",
@@ -338,6 +339,7 @@ class AssemblyAISTTService(STTService):
                         language
                     )
                     
+                    # Always push interim frames for real-time feedback
                     await self.push_frame(frame)
             
             elif message_type == 'Error':
@@ -436,14 +438,15 @@ class AssemblyAISTTService(STTService):
         
         Following Deepgram's pattern for filtering transcriptions during bot speech.
         """
-        # If bot is speaking and interruptions are not allowed, ignore user speech
+        # If bot is speaking and interruptions are not allowed, block ONLY final transcripts
+        # Allow interim transcripts through for real-time feedback
         if self._bot_speaking and not self._allow_stt_interruptions:
-            logger.debug(f"{self}: Ignoring transcription because bot is speaking and interruptions disabled: '{transcript}'")
-            return True
+            if is_formatted:
+                logger.debug(f"{self}: Ignoring FINAL transcription because bot is speaking and interruptions disabled: '{transcript}'")
+                return True
+            else:
+                # Allow interim transcripts through for UI feedback even when bot is speaking
+                return False
         
-        # For interim transcripts while bot is speaking, be more conservative
-        if self._bot_speaking and not is_formatted:
-            logger.debug(f"{self}: Ignoring interim transcription while bot is speaking: '{transcript}'")
-            return True
-        
+        # If interruptions are allowed, let everything through
         return False
