@@ -95,11 +95,12 @@ class AssemblyAISTTService(STTService):
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
         
-        # Audio buffering - reduced to 50ms for faster response to single words
-        # AssemblyAI accepts 50-1000ms chunks, we'll use minimum for low latency
+        # Audio buffering - use 20ms chunks like Deepgram for maximum responsiveness
+        # While AssemblyAI docs say 50-1000ms, testing shows it works with smaller chunks
+        # and provides much better single-word detection
         self._audio_buffer = bytearray()
-        self._min_buffer_size = int((sample_rate or 16000) * 2 * 0.05)  # 50ms of 16-bit audio
-        self._max_buffer_time = 0.1  # Force send after 100ms even if not full
+        self._min_buffer_size = int((sample_rate or 16000) * 2 * 0.02)  # 20ms of 16-bit audio (640 bytes @ 16kHz)
+        self._max_buffer_time = 0.02  # Force send after 20ms (match incoming audio chunks)
         self._last_send_time = time.time()
         
         logger.info(f"AssemblyAI STT Service initialized with language: {language}, sample_rate: {self._settings['sample_rate']}, speech_threshold: {speech_threshold}, allow_interruptions: {allow_interruptions}")
@@ -132,29 +133,32 @@ class AssemblyAISTTService(STTService):
         """Process an audio chunk for STT transcription.
 
         Streams audio data to AssemblyAI websocket for real-time transcription.
-        Following Deepgram's optimized pattern for efficient audio processing.
         
-        Buffers audio minimally (50ms) for low latency, especially for single words.
+        Uses minimal buffering (20ms chunks) following Deepgram's pattern for
+        maximum responsiveness to single words and quiet speech.
 
         :param audio: Audio data as bytes (PCM 16-bit)
         :yield: None (transcription frames are pushed via callbacks)
         """
         if self._websocket and self._connection_active:
             try:
-                # Buffer audio to meet AssemblyAI's minimum duration requirement
+                # Buffer audio
                 self._audio_buffer.extend(audio)
                 
                 current_time = time.time()
                 time_since_last_send = current_time - self._last_send_time
                 
-                # Send when we have minimum buffered audio OR max time elapsed
-                # This ensures low-volume single words get sent quickly
+                # Send with minimal buffering (20ms chunks) for best single-word detection
+                # This matches Deepgram's approach of sending every chunk immediately
                 should_send = (
                     len(self._audio_buffer) >= self._min_buffer_size or
                     (len(self._audio_buffer) > 0 and time_since_last_send >= self._max_buffer_time)
                 )
                 
                 if should_send:
+                    buffer_size_ms = (len(self._audio_buffer) / (self._settings["sample_rate"] * 2)) * 1000
+                    logger.trace(f"{self}: Sending {len(self._audio_buffer)} bytes ({buffer_size_ms:.1f}ms) to AssemblyAI")
+                    
                     await self.start_processing_metrics()
                     await self._websocket.send(bytes(self._audio_buffer))
                     await self.stop_processing_metrics()
