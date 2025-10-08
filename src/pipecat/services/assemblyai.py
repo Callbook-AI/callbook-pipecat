@@ -58,6 +58,8 @@ class AssemblyAISTTService(STTService):
         format_turns: bool = True,  # Enable formatted turns for better punctuation
         enable_vad: bool = True,  # Voice Activity Detection
         allow_interruptions: bool = True,  # Allow user to interrupt bot
+        word_boost: Optional[list] = None,  # Boost specific words for better recognition
+        speech_threshold: float = 0.3,  # Lower = more sensitive to quiet speech (0.0-1.0)
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -77,7 +79,12 @@ class AssemblyAISTTService(STTService):
             "sample_rate": sample_rate or 16000,
             "format_turns": format_turns,
             "language": language,
+            "speech_threshold": speech_threshold,  # More sensitive to low volume
         }
+        
+        # Add word boost if provided (helps with common words like "hola", "bien")
+        if word_boost:
+            self._settings["word_boost"] = word_boost
         
         # Performance tracking
         self._stt_response_times = []
@@ -88,12 +95,14 @@ class AssemblyAISTTService(STTService):
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
         
-        # Audio buffering to meet AssemblyAI's minimum duration requirements
-        # AssemblyAI expects 50-1000ms chunks, we'll buffer to ~100ms
+        # Audio buffering - reduced to 50ms for faster response to single words
+        # AssemblyAI accepts 50-1000ms chunks, we'll use minimum for low latency
         self._audio_buffer = bytearray()
-        self._min_buffer_size = int((sample_rate or 16000) * 2 * 0.1)  # 100ms of 16-bit audio
+        self._min_buffer_size = int((sample_rate or 16000) * 2 * 0.05)  # 50ms of 16-bit audio
+        self._max_buffer_time = 0.1  # Force send after 100ms even if not full
+        self._last_send_time = time.time()
         
-        logger.info(f"AssemblyAI STT Service initialized with language: {language}, sample_rate: {self._settings['sample_rate']}, allow_interruptions: {allow_interruptions}")
+        logger.info(f"AssemblyAI STT Service initialized with language: {language}, sample_rate: {self._settings['sample_rate']}, speech_threshold: {speech_threshold}, allow_interruptions: {allow_interruptions}")
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -125,7 +134,7 @@ class AssemblyAISTTService(STTService):
         Streams audio data to AssemblyAI websocket for real-time transcription.
         Following Deepgram's optimized pattern for efficient audio processing.
         
-        Buffers audio to meet AssemblyAI's minimum duration requirement (50-1000ms).
+        Buffers audio minimally (50ms) for low latency, especially for single words.
 
         :param audio: Audio data as bytes (PCM 16-bit)
         :yield: None (transcription frames are pushed via callbacks)
@@ -135,14 +144,24 @@ class AssemblyAISTTService(STTService):
                 # Buffer audio to meet AssemblyAI's minimum duration requirement
                 self._audio_buffer.extend(audio)
                 
-                # Send when we have enough buffered audio (100ms worth)
-                if len(self._audio_buffer) >= self._min_buffer_size:
+                current_time = time.time()
+                time_since_last_send = current_time - self._last_send_time
+                
+                # Send when we have minimum buffered audio OR max time elapsed
+                # This ensures low-volume single words get sent quickly
+                should_send = (
+                    len(self._audio_buffer) >= self._min_buffer_size or
+                    (len(self._audio_buffer) > 0 and time_since_last_send >= self._max_buffer_time)
+                )
+                
+                if should_send:
                     await self.start_processing_metrics()
                     await self._websocket.send(bytes(self._audio_buffer))
                     await self.stop_processing_metrics()
                     
-                    # Clear buffer after sending
+                    # Clear buffer and update timestamp
                     self._audio_buffer.clear()
+                    self._last_send_time = current_time
                     
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"{self}: WebSocket connection closed, attempting to reconnect")
@@ -167,7 +186,13 @@ class AssemblyAISTTService(STTService):
                 "sample_rate": self._settings["sample_rate"],
                 "format_turns": str(self._settings["format_turns"]).lower(),
                 "language": self._settings["language"],
+                "speech_threshold": self._settings["speech_threshold"],  # More sensitive
             }
+            
+            # Add word_boost if configured
+            if "word_boost" in self._settings:
+                connection_params["word_boost"] = json.dumps(self._settings["word_boost"])
+            
             url = f"{base_url}?{urlencode(connection_params)}"
             
             logger.info(f"{self}: Connecting to AssemblyAI at {base_url}")
