@@ -13,12 +13,15 @@ from urllib.parse import urlencode
 from loguru import logger
 
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     ErrorFrame,
     Frame,
     InterimTranscriptionFrame,
     StartFrame,
+    StartInterruptionFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
@@ -54,6 +57,7 @@ class AssemblyAISTTService(STTService):
         language: str = "multi",  # Spanish by default, supports "multi" for multilingual
         format_turns: bool = True,  # Enable formatted turns for better punctuation
         enable_vad: bool = True,  # Voice Activity Detection
+        allow_interruptions: bool = True,  # Allow user to interrupt bot
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -63,6 +67,10 @@ class AssemblyAISTTService(STTService):
         self._receive_task = None
         self._user_speaking = False
         self._language = language
+        self._allow_stt_interruptions = allow_interruptions
+        
+        # Bot speaking state (for interruption handling)
+        self._bot_speaking = False
         
         # Optimized settings following Deepgram pattern
         self._settings = {
@@ -80,7 +88,12 @@ class AssemblyAISTTService(STTService):
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
         
-        logger.info(f"AssemblyAI STT Service initialized with language: {language}, sample_rate: {self._settings['sample_rate']}")
+        # Audio buffering to meet AssemblyAI's minimum duration requirements
+        # AssemblyAI expects 50-1000ms chunks, we'll buffer to ~100ms
+        self._audio_buffer = bytearray()
+        self._min_buffer_size = int((sample_rate or 16000) * 2 * 0.1)  # 100ms of 16-bit audio
+        
+        logger.info(f"AssemblyAI STT Service initialized with language: {language}, sample_rate: {self._settings['sample_rate']}, allow_interruptions: {allow_interruptions}")
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -111,15 +124,26 @@ class AssemblyAISTTService(STTService):
 
         Streams audio data to AssemblyAI websocket for real-time transcription.
         Following Deepgram's optimized pattern for efficient audio processing.
+        
+        Buffers audio to meet AssemblyAI's minimum duration requirement (50-1000ms).
 
         :param audio: Audio data as bytes (PCM 16-bit)
         :yield: None (transcription frames are pushed via callbacks)
         """
         if self._websocket and self._connection_active:
             try:
-                await self.start_processing_metrics()
-                await self._websocket.send(audio)
-                await self.stop_processing_metrics()
+                # Buffer audio to meet AssemblyAI's minimum duration requirement
+                self._audio_buffer.extend(audio)
+                
+                # Send when we have enough buffered audio (100ms worth)
+                if len(self._audio_buffer) >= self._min_buffer_size:
+                    await self.start_processing_metrics()
+                    await self._websocket.send(bytes(self._audio_buffer))
+                    await self.stop_processing_metrics()
+                    
+                    # Clear buffer after sending
+                    self._audio_buffer.clear()
+                    
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"{self}: WebSocket connection closed, attempting to reconnect")
                 await self._reconnect()
@@ -191,6 +215,12 @@ class AssemblyAISTTService(STTService):
         # Close websocket
         if self._websocket:
             try:
+                # Flush any remaining buffered audio before closing
+                if len(self._audio_buffer) > 0:
+                    logger.debug(f"{self}: Flushing {len(self._audio_buffer)} bytes of buffered audio before disconnect")
+                    await self._websocket.send(bytes(self._audio_buffer))
+                    self._audio_buffer.clear()
+                
                 # Send terminate message
                 await self._websocket.send(json.dumps({"type": "Terminate"}))
                 await self._websocket.close()
@@ -199,6 +229,7 @@ class AssemblyAISTTService(STTService):
                 logger.debug(f"{self}: Error during disconnect: {e}")
             finally:
                 self._websocket = None
+                self._audio_buffer.clear()  # Clear buffer on disconnect
 
     async def _reconnect(self):
         """Attempt to reconnect to AssemblyAI service."""
@@ -248,6 +279,13 @@ class AssemblyAISTTService(STTService):
                 if not transcript:
                     return
                 
+                # Check if it's a formatted turn (final) or interim
+                is_formatted = data.get('turn_is_formatted', False)
+                
+                # Check if we should ignore this transcription (bot speaking, etc.)
+                if await self._should_ignore_transcription(transcript, is_formatted):
+                    return
+                
                 # Stop TTFB metrics on first transcript
                 await self.stop_ttfb_metrics()
                 
@@ -257,8 +295,6 @@ class AssemblyAISTTService(STTService):
                     self._stt_response_times.append(elapsed)
                     logger.debug(f"{self}: STT response time: {elapsed:.3f}s")
                 
-                # Check if it's a formatted turn (final) or interim
-                is_formatted = data.get('turn_is_formatted', False)
                 timestamp = time_now_iso8601()
                 
                 # Convert language string to Language enum
@@ -267,6 +303,11 @@ class AssemblyAISTTService(STTService):
                 if is_formatted:
                     # This is a final, formatted transcript
                     logger.info(f"{self}: FINAL transcript: '{transcript}'")
+                    
+                    # Send interruption if bot was speaking
+                    if self._bot_speaking and self._allow_stt_interruptions:
+                        logger.info(f"{self}: User interrupted bot with: '{transcript}'")
+                        await self.push_frame(StartInterruptionFrame(), FrameDirection.UPSTREAM)
                     
                     await self._handle_user_speaking()
                     
@@ -366,3 +407,43 @@ class AssemblyAISTTService(STTService):
     def is_connected(self) -> bool:
         """Check if websocket is connected and active."""
         return self._connection_active and self._websocket is not None
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames for bot speaking state and interruption handling.
+        
+        Following Deepgram's pattern for handling bot speaking state.
+        """
+        await super().process_frame(frame, direction)
+        
+        # Handle bot speaking state for interruption detection
+        if isinstance(frame, BotStartedSpeakingFrame):
+            await self._handle_bot_speaking()
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            await self._handle_bot_silence()
+
+    async def _handle_bot_speaking(self):
+        """Handle bot started speaking event."""
+        self._bot_speaking = True
+        logger.debug(f"{self}: Bot started speaking")
+
+    async def _handle_bot_silence(self):
+        """Handle bot stopped speaking event."""
+        self._bot_speaking = False
+        logger.debug(f"{self}: Bot stopped speaking")
+
+    async def _should_ignore_transcription(self, transcript: str, is_formatted: bool) -> bool:
+        """Determine if a transcription should be ignored.
+        
+        Following Deepgram's pattern for filtering transcriptions during bot speech.
+        """
+        # If bot is speaking and interruptions are not allowed, ignore user speech
+        if self._bot_speaking and not self._allow_stt_interruptions:
+            logger.debug(f"{self}: Ignoring transcription because bot is speaking and interruptions disabled: '{transcript}'")
+            return True
+        
+        # For interim transcripts while bot is speaking, be more conservative
+        if self._bot_speaking and not is_formatted:
+            logger.debug(f"{self}: Ignoring interim transcription while bot is speaking: '{transcript}'")
+            return True
+        
+        return False
