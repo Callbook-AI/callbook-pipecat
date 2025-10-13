@@ -202,12 +202,10 @@ class AssemblyAISTTService(STTService):
                 current_time_wall = time.time()
                 time_since_last_send = current_time_wall - self._last_send_time
                 
-                # Send when we reach 50ms minimum (AssemblyAI's strict requirement)
-                # or when 50ms has elapsed since last send
-                should_send = (
-                    len(self._audio_buffer) >= self._min_buffer_size or
-                    (len(self._audio_buffer) > 0 and time_since_last_send >= self._max_buffer_time)
-                )
+                # CRITICAL: AssemblyAI strictly requires 50-1000ms audio chunks
+                # We must NEVER send buffers smaller than 50ms, even after timeout
+                # Otherwise we get error 3005 (Input Duration Violation)
+                should_send = len(self._audio_buffer) >= self._min_buffer_size
                 
                 if should_send:
                     buffer_size_ms = (len(self._audio_buffer) / (self._settings["sample_rate"] * 2)) * 1000
@@ -220,6 +218,10 @@ class AssemblyAISTTService(STTService):
                     # Clear buffer and update timestamp
                     self._audio_buffer.clear()
                     self._last_send_time = current_time_wall
+                elif len(self._audio_buffer) > 0 and time_since_last_send >= self._max_buffer_time:
+                    # Buffer too small but timeout elapsed - keep accumulating
+                    buffer_size_ms = (len(self._audio_buffer) / (self._settings["sample_rate"] * 2)) * 1000
+                    logger.trace(f"⏳ {self}: Holding {len(self._audio_buffer)} bytes ({buffer_size_ms:.1f}ms) - need {self._min_buffer_size} bytes minimum")
                     
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"{self}: WebSocket connection closed, attempting to reconnect")
@@ -303,10 +305,17 @@ class AssemblyAISTTService(STTService):
         # Close websocket
         if self._websocket:
             try:
-                # Flush any remaining buffered audio before closing
-                if len(self._audio_buffer) > 0:
-                    logger.debug(f"{self}: Flushing {len(self._audio_buffer)} bytes of buffered audio before disconnect")
+                # Only flush if buffer meets minimum size requirement (avoid error 3005)
+                buffer_size = len(self._audio_buffer)
+                if buffer_size >= self._min_buffer_size:
+                    buffer_duration_ms = (buffer_size / (self._settings["sample_rate"] * 2)) * 1000
+                    logger.debug(f"{self}: Flushing {buffer_size} bytes ({buffer_duration_ms:.1f}ms) before disconnect")
                     await self._websocket.send(bytes(self._audio_buffer))
+                    self._audio_buffer.clear()
+                elif buffer_size > 0:
+                    # Too small to send - would trigger error 3005
+                    buffer_duration_ms = (buffer_size / (self._settings["sample_rate"] * 2)) * 1000
+                    logger.debug(f"{self}: Discarding {buffer_size} bytes ({buffer_duration_ms:.1f}ms) - too small for AssemblyAI requirements")
                     self._audio_buffer.clear()
                 
                 # Send terminate message
