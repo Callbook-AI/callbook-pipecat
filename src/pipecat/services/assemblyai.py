@@ -902,11 +902,7 @@ class AssemblyAISTTService(STTService):
             return
 
     async def _handle_false_interim(self, current_time):
-        """Detect and handle false interim transcripts with enhanced logging.
-        
-        This detects when a user has stopped speaking by checking if no interim transcripts
-        have been received within the threshold time. This is part of "user idle" detection.
-        """
+        """Detect and handle false interim transcripts with enhanced logging."""
         if not self._user_speaking:
             logger.trace("False interim check: User not speaking, skipping")
             return
@@ -925,18 +921,26 @@ class AssemblyAISTTService(STTService):
             logger.trace(f"False interim check: Delay {last_interim_delay:.3f}s < threshold {self._false_interim_seconds}s, skipping")
             return
 
-        # NEW: Send accumulated transcripts IMMEDIATELY when user idle detected
-        # Don't wait for the final - use what we have from interims
+        # ✅ NEW: Check if we have a transcript WITHOUT punctuation
+        # Don't send partial transcripts - wait for FINAL with punctuation
         if len(self._accum_transcription_frames) > 0:
-            logger.info(f"⚡ Fast response: Sending interim transcript on user idle ({len(self._accum_transcription_frames)} frames)")
-            await self._send_accum_transcriptions()
-            return  # _send_accum_transcriptions already calls _handle_user_silence
+            last_text = self._accum_transcription_frames[-1].text
+            has_punctuation = not self._is_accum_transcription(last_text)
+            
+            # If transcript has punctuation, it's complete - send it
+            if has_punctuation:
+                logger.info(f"⚡ Fast response: Sending complete transcript on user idle: '{last_text}'")
+                await self._send_accum_transcriptions()
+                return
+            
+            # If transcript has NO punctuation, it's incomplete - DON'T send, wait for FINAL
+            logger.debug(f"⏳ User idle but transcript incomplete (no punctuation): '{last_text}' - waiting for FINAL")
+            # Just mark user as stopped, don't send the incomplete transcript
+            await self._handle_user_silence()
+            return
         
         # If no accumulated frames, still mark user as stopped
-        logger.info(f"⏰ User idle detected: {last_interim_delay:.3f}s since last interim (threshold: {self._false_interim_seconds}s)")
-        logger.debug(f"   ├─ VAD active: {self._vad_active}")
-        logger.debug(f"   ├─ Bot speaking: {self._bot_speaking}")
-        logger.debug(f"   └─ Sending UserStoppedSpeakingFrame")
+        logger.info(f"⏰ User idle detected: {last_interim_delay:.3f}s since last interim")
         await self._handle_user_silence()
 
     async def _async_handler(self, task_name):
