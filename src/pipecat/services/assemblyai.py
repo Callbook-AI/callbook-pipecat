@@ -742,8 +742,41 @@ class AssemblyAISTTService(STTService):
         return not text[-1] in END_OF_PHRASE_CHARACTERS
     
     def _append_accum_transcription(self, frame: TranscriptionFrame):
-        """Append transcription frame to accumulation buffer."""
+        """Append transcription frame to accumulation buffer, only if text changed.
+        
+        Deduplicates frames by:
+        - Skipping exact duplicates
+        - Replacing frames when text extends previous text
+        - Adding new frames only when text is truly new
+        """
         self._last_time_accum_transcription = time.time()
+        
+        new_text = frame.text.strip()
+        
+        # Check if this text is different from the last accumulated frame
+        if self._accum_transcription_frames:
+            last_frame = self._accum_transcription_frames[-1]
+            last_text = last_frame.text.strip()
+            
+            if new_text == last_text:
+                # Exact duplicate - skip completely
+                logger.trace(f"⏭️  Skipping duplicate transcript: '{new_text}'")
+                return
+            
+            # If the new text extends the old text, replace the frame
+            if new_text.startswith(last_text):
+                logger.debug(f"🔄 Extending transcript: '{last_text}' → '{new_text}'")
+                self._accum_transcription_frames[-1] = frame
+                return
+            
+            # If old text extends new text (backtracking), replace anyway
+            if last_text.startswith(new_text):
+                logger.debug(f"⬅️  Backtracking transcript: '{last_text}' → '{new_text}'")
+                self._accum_transcription_frames[-1] = frame
+                return
+        
+        # Truly new text, add it
+        logger.debug(f"✅ Adding new transcript to accumulation: '{new_text}'")
         self._accum_transcription_frames.append(frame)
 
     def _handle_first_message(self, text):
