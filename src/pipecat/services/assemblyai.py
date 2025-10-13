@@ -454,20 +454,15 @@ class AssemblyAISTTService(STTService):
                         logger.debug(f"🔄 {self}: Reset speech timing counters")
                     
                     # ✅ FIX: Check if we already sent this exact transcript via fast response
-                    # This prevents duplicate sends when fast response sent the interim
-                    if self._accum_transcription_frames:
-                        last_sent_text = self._accum_transcription_frames[-1].text.strip()
-                        if transcript.strip() == last_sent_text:
-                            logger.debug(f"⏭️ Skipping FINAL - already sent via fast response: '{transcript}'")
-                            return
+                    if self._last_sent_transcript and transcript.strip() == self._last_sent_transcript:
+                        logger.debug(f"⏭️ Skipping FINAL - already sent via fast response: '{transcript}'")
+                        self._last_sent_transcript = None  # Clear for next time
+                        return
                     
                     # Send interruption if bot was speaking
                     if self._bot_speaking and self._allow_stt_interruptions:
                         logger.info(f"{self}: User interrupted bot with: '{transcript}'")
                         await self.push_frame(StartInterruptionFrame(), FrameDirection.UPSTREAM)
-                    
-                    # ❌ REMOVED: await self._handle_user_speaking()
-                    # The interim already called this - don't re-trigger user started speaking!
                     
                     frame = TranscriptionFrame(
                         transcript, 
