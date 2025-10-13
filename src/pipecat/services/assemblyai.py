@@ -7,7 +7,7 @@
 import asyncio
 import json
 import time
-from typing import AsyncGenerator, Optional, Dict
+from typing import AsyncGenerator, Optional, Dict, List
 from urllib.parse import urlencode
 
 from loguru import logger
@@ -25,11 +25,14 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    VoicemailFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_services import STTService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
+from pipecat.utils.string import is_equivalent_basic
+from pipecat.utils.text import voicemail
 
 try:
     import websockets
@@ -40,6 +43,12 @@ except ModuleNotFoundError as e:
     )
     raise Exception(f"Missing module: {e}")
 
+# Constants for optimized behavior (matching Deepgram patterns)
+DEFAULT_ON_NO_PUNCTUATION_SECONDS = 2
+IGNORE_REPEATED_MSG_AT_START_SECONDS = 4
+VOICEMAIL_DETECTION_SECONDS = 10
+FALSE_INTERIM_SECONDS = 1.3
+
 
 class AssemblyAISTTService(STTService):
     """Optimized AssemblyAI STT Service using Universal-1 model with websocket connection.
@@ -47,6 +56,13 @@ class AssemblyAISTTService(STTService):
     This implementation follows the Deepgram service pattern for optimized performance,
     using direct websocket communication with AssemblyAI's Universal-1 model which
     supports Spanish and multilingual transcription.
+    
+    Features:
+    - Fast response mode for minimal latency
+    - Voicemail detection
+    - Advanced transcript filtering and accumulation
+    - Bot speaking state tracking
+    - Comprehensive performance metrics
     """
     
     def __init__(
@@ -60,6 +76,9 @@ class AssemblyAISTTService(STTService):
         allow_interruptions: bool = True,  # Allow user to interrupt bot
         word_boost: Optional[list] = None,  # Boost specific words for better recognition
         speech_threshold: float = 0.3,  # Lower = more sensitive to quiet speech (0.0-1.0)
+        on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS,
+        detect_voicemail: bool = True,  # Enable voicemail detection
+        fast_response: bool = False,  # Enable fast response mode for minimal latency
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -67,12 +86,18 @@ class AssemblyAISTTService(STTService):
         self._api_key = api_key
         self._websocket = None
         self._receive_task = None
+        self._async_handler_task = None
         self._user_speaking = False
         self._language = language
         self._allow_stt_interruptions = allow_interruptions
+        self.detect_voicemail = detect_voicemail
+        self._fast_response = fast_response
+        self._on_no_punctuation_seconds = on_no_punctuation_seconds
         
         # Bot speaking state (for interruption handling)
-        self._bot_speaking = False
+        self._bot_speaking = True  # Start as True like Deepgram
+        self._bot_has_ever_spoken = False  # Track if bot has spoken at least once
+        self._bot_started_speaking_time = None  # Track when bot started speaking
         
         # Optimized settings following Deepgram pattern
         self._settings = {
@@ -86,14 +111,26 @@ class AssemblyAISTTService(STTService):
         if word_boost:
             self._settings["word_boost"] = word_boost
         
-        # Performance tracking
+        # Performance tracking (enhanced like Deepgram)
         self._stt_response_times = []
         self._current_speech_start_time = None
+        self._last_audio_chunk_time = None
+        self._audio_chunk_count = 0
         self._connection_active = False
         
         # Accumulation for sentence handling (like Deepgram)
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
+        self._last_interim_time = None
+        
+        # First message tracking (for voicemail and repeated message detection)
+        self._first_message = None
+        self._first_message_time = None
+        self._was_first_transcript_receipt = False
+        
+        # Timing tracking
+        self.start_time = time.time()
+        self._last_time_transcription = time.time()
         
         # Audio buffering - AssemblyAI strictly requires 50-1000ms chunks (enforced with error 3005)
         # We use 50ms minimum for best responsiveness while meeting their requirements
@@ -102,7 +139,10 @@ class AssemblyAISTTService(STTService):
         self._max_buffer_time = 0.05  # Force send after 50ms minimum
         self._last_send_time = time.time()
         
-        logger.info(f"AssemblyAI STT Service initialized with language: {language}, sample_rate: {self._settings['sample_rate']}, speech_threshold: {speech_threshold}, allow_interruptions: {allow_interruptions}")
+        logger.info(f"AssemblyAI STT Service initialized:")
+        logger.info(f"  Language: {language}, Sample rate: {self._settings['sample_rate']}")
+        logger.info(f"  Speech threshold: {speech_threshold}, Allow interruptions: {allow_interruptions}")
+        logger.info(f"  Fast response: {fast_response}, Detect voicemail: {detect_voicemail}")
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -119,6 +159,10 @@ class AssemblyAISTTService(STTService):
     async def start(self, frame: StartFrame):
         await super().start(frame)
         await self._connect()
+        
+        # Start async handler for fast response and timeout management
+        if not self._async_handler_task:
+            self._async_handler_task = self.create_monitored_task(self._async_handler)
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
@@ -142,11 +186,21 @@ class AssemblyAISTTService(STTService):
         """
         if self._websocket and self._connection_active:
             try:
+                # Enhanced timing tracking (like Deepgram)
+                current_time = time.perf_counter()
+                self._last_audio_chunk_time = current_time
+                self._audio_chunk_count += 1
+                
+                # Start timing when we receive first audio after speech detection
+                if self._current_speech_start_time is None:
+                    self._current_speech_start_time = current_time
+                    logger.debug(f"🎤 {self}: Starting speech detection timer at chunk #{self._audio_chunk_count}")
+                
                 # Buffer audio
                 self._audio_buffer.extend(audio)
                 
-                current_time = time.time()
-                time_since_last_send = current_time - self._last_send_time
+                current_time_wall = time.time()
+                time_since_last_send = current_time_wall - self._last_send_time
                 
                 # Send when we reach 50ms minimum (AssemblyAI's strict requirement)
                 # or when 50ms has elapsed since last send
@@ -157,7 +211,7 @@ class AssemblyAISTTService(STTService):
                 
                 if should_send:
                     buffer_size_ms = (len(self._audio_buffer) / (self._settings["sample_rate"] * 2)) * 1000
-                    logger.trace(f"{self}: Sending {len(self._audio_buffer)} bytes ({buffer_size_ms:.1f}ms) to AssemblyAI")
+                    logger.trace(f"⚡ {self}: Sending {len(self._audio_buffer)} bytes ({buffer_size_ms:.1f}ms) to AssemblyAI")
                     
                     await self.start_processing_metrics()
                     await self._websocket.send(bytes(self._audio_buffer))
@@ -165,7 +219,7 @@ class AssemblyAISTTService(STTService):
                     
                     # Clear buffer and update timestamp
                     self._audio_buffer.clear()
-                    self._last_send_time = current_time
+                    self._last_send_time = current_time_wall
                     
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"{self}: WebSocket connection closed, attempting to reconnect")
@@ -235,6 +289,11 @@ class AssemblyAISTTService(STTService):
     async def _disconnect(self):
         """Disconnect from AssemblyAI service and clean up resources."""
         self._connection_active = False
+        
+        # Cancel async handler task
+        if self._async_handler_task:
+            await self.cancel_task(self._async_handler_task)
+            self._async_handler_task = None
         
         # Cancel receive task
         if self._receive_task:
@@ -311,27 +370,41 @@ class AssemblyAISTTService(STTService):
                 # Check if it's a formatted turn (final) or interim
                 is_formatted = data.get('turn_is_formatted', False)
                 
-                # Check if we should ignore this transcription (bot speaking, etc.)
-                if await self._should_ignore_transcription(transcript, is_formatted):
-                    return
-                
                 # Stop TTFB metrics on first transcript
                 await self.stop_ttfb_metrics()
                 
-                # Track response time
-                if self._current_speech_start_time is not None:
-                    elapsed = time.perf_counter() - self._current_speech_start_time
-                    self._stt_response_times.append(elapsed)
-                    logger.debug(f"{self}: STT response time: {elapsed:.3f}s")
+                # Log transcript receipt
+                transcript_type = "FINAL" if is_formatted else "INTERIM"
+                logger.info(f"AssemblyAI: {transcript_type} transcript received - Text: '{transcript}'")
+                
+                # Check voicemail detection (only for final transcripts)
+                if is_formatted and await self._detect_and_handle_voicemail(transcript):
+                    logger.info(f"{self}: Voicemail detected and handled")
+                    return
+                
+                # Check if we should ignore this transcription (bot speaking, repeated messages, etc.)
+                if await self._should_ignore_transcription(transcript, is_formatted):
+                    return
                 
                 timestamp = time_now_iso8601()
-                
-                # Convert language string to Language enum
-                language = Language.ES if self._language == "es" else Language.EN
+                language = self._get_language_enum()
                 
                 if is_formatted:
                     # This is a final, formatted transcript
-                    logger.info(f"{self}: FINAL transcript: '{transcript}'")
+                    
+                    # Enhanced response time measurement
+                    if self._current_speech_start_time is not None:
+                        elapsed = time.perf_counter() - self._current_speech_start_time
+                        elapsed_formatted = round(elapsed, 3)
+                        self._stt_response_times.append(elapsed_formatted)
+                        
+                        logger.info(f"📊 ⚡ AssemblyAI: ⏱️ STT Response Time: {elapsed_formatted}s")
+                        logger.info(f"   📝 Final Transcript: '{transcript}'")
+                        logger.info(f"   📦 Audio chunks processed: {self._audio_chunk_count}")
+                        
+                        self._current_speech_start_time = None
+                        self._audio_chunk_count = 0
+                        logger.debug(f"🔄 {self}: Reset speech timing counters")
                     
                     # Send interruption if bot was speaking
                     if self._bot_speaking and self._allow_stt_interruptions:
@@ -347,17 +420,27 @@ class AssemblyAISTTService(STTService):
                         language
                     )
                     
-                    # Accumulate transcription (like Deepgram)
-                    self._accum_transcription_frames.append(frame)
-                    self._last_time_accum_transcription = time.time()
+                    # Track first message
+                    self._handle_first_message(frame.text)
                     
-                    # Send accumulated transcriptions
-                    await self._send_accum_transcriptions()
+                    # Accumulate transcription (like Deepgram)
+                    self._append_accum_transcription(frame)
+                    self._was_first_transcript_receipt = True
+                    self._last_time_transcription = time.time()
+                    
+                    # Send accumulated transcriptions based on mode
+                    if self._fast_response:
+                        await self._fast_response_send_accum_transcriptions()
+                    else:
+                        if not self._is_accum_transcription(frame.text):
+                            logger.debug("Sending final transcription frame (end of sentence)")
+                            await self._send_accum_transcriptions()
                     
                 else:
                     # This is an interim transcript - push immediately for low latency
                     logger.debug(f"{self}: INTERIM transcript: '{transcript}'")
                     
+                    self._last_interim_time = time.time()
                     await self._handle_user_speaking()
                     
                     # Create and push interim frame immediately (like Deepgram)
@@ -404,10 +487,12 @@ class AssemblyAISTTService(STTService):
         
         Following Deepgram's pattern for sentence-based transcript accumulation.
         """
-        if not self._accum_transcription_frames:
+        if not len(self._accum_transcription_frames):
             return
 
-        logger.debug(f"{self}: Sending accumulated transcriptions")
+        logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
+
+        await self._handle_user_speaking()
 
         for frame in self._accum_transcription_frames:
             await self.push_frame(frame)
@@ -417,14 +502,15 @@ class AssemblyAISTTService(STTService):
         await self.stop_processing_metrics()
 
     def get_stt_stats(self) -> Dict:
-        """Get STT performance statistics."""
+        """Get comprehensive STT performance statistics."""
         if not self._stt_response_times:
             return {
                 "count": 0,
                 "average": 0.0,
                 "min": 0.0,
                 "max": 0.0,
-                "latest": 0.0
+                "latest": 0.0,
+                "all_times": []
             }
         
         return {
@@ -433,6 +519,7 @@ class AssemblyAISTTService(STTService):
             "min": round(min(self._stt_response_times), 3),
             "max": round(max(self._stt_response_times), 3),
             "latest": round(self._stt_response_times[-1], 3) if self._stt_response_times else 0.0,
+            "all_times": [round(t, 3) for t in self._stt_response_times]
         }
 
     def is_connected(self) -> bool:
@@ -455,20 +542,33 @@ class AssemblyAISTTService(STTService):
     async def _handle_bot_speaking(self):
         """Handle bot started speaking event."""
         self._bot_speaking = True
-        logger.debug(f"{self}: Bot started speaking")
+        self._bot_has_ever_spoken = True  # Mark that bot has spoken at least once
+        self._bot_started_speaking_time = time.time()  # Track when bot started speaking
+        logger.debug(f"🤖 {self}: Bot started speaking at {self._bot_started_speaking_time}")
 
     async def _handle_bot_silence(self):
         """Handle bot stopped speaking event."""
         self._bot_speaking = False
-        logger.debug(f"{self}: Bot stopped speaking")
+        self._bot_started_speaking_time = None  # Reset the timestamp
+        logger.debug(f"🤖 {self}: Bot stopped speaking")
 
     async def _should_ignore_transcription(self, transcript: str, is_formatted: bool) -> bool:
         """Determine if a transcription should be ignored.
         
         Following Deepgram's pattern for filtering transcriptions during bot speech.
         """
-        # If bot is speaking and interruptions are not allowed, block ONLY final transcripts
-        # Allow interim transcripts through for real-time feedback
+        # Check if fast greeting should be ignored
+        time_start = self._time_since_init()
+        if self._should_ignore_fast_greeting(transcript, time_start):
+            return True
+        
+        # Check for repeated first message
+        if self._should_ignore_first_repeated_message(transcript):
+            logger.debug(f"{self}: Ignoring repeated first message")
+            return True
+        
+        # If bot is speaking and interruptions are not allowed
+        logger.debug(f"Bot speaking: {self._bot_speaking} | allow_interruptions: {self._allow_stt_interruptions}")
         if self._bot_speaking and not self._allow_stt_interruptions:
             if is_formatted:
                 logger.debug(f"{self}: Ignoring FINAL transcription because bot is speaking and interruptions disabled: '{transcript}'")
@@ -477,5 +577,226 @@ class AssemblyAISTTService(STTService):
                 # Allow interim transcripts through for UI feedback even when bot is speaking
                 return False
         
+        # Ignore single word interruptions when bot is speaking (even if interruptions allowed)
+        if self._bot_speaking and self._transcript_words_count(transcript) == 1:
+            logger.debug(f"{self}: Ignoring interruption because bot is speaking (single word): {transcript}")
+            return True
+        
         # If interruptions are allowed, let everything through
         return False
+
+    def _time_since_init(self):
+        """Get time elapsed since service initialization."""
+        return time.time() - self.start_time
+
+    def _transcript_words_count(self, transcript: str):
+        """Count words in transcript."""
+        return len(transcript.split(" "))
+
+    def _should_ignore_fast_greeting(self, transcript: str, time_start: float) -> bool:
+        """
+        Check if a fast greeting (single word, early timing) should be ignored.
+
+        Rules:
+        - If bot is speaking: ignore
+        - If bot hasn't spoken yet: ignore
+        - If bot has spoken at least once: allow (return False)
+        """
+        # Only applies to single-word transcripts within first second
+        if time_start >= 1 or self._transcript_words_count(transcript) != 1:
+            return False
+
+        # Ignore if bot is currently speaking
+        if self._bot_speaking:
+            logger.debug("Ignoring fast greeting - bot is speaking")
+            return True
+
+        # Ignore if bot hasn't spoken yet (prevents false early detections)
+        if not self._bot_has_ever_spoken:
+            logger.debug("Ignoring fast greeting - bot hasn't spoken yet")
+            return True
+
+        # Allow if bot has spoken at least once (user responding)
+        logger.debug("Accepting fast greeting - bot has spoken at least once")
+        return False
+
+    def _is_accum_transcription(self, text: str):
+        """Check if text should be accumulated or sent immediately."""
+        END_OF_PHRASE_CHARACTERS = ['.', '?', '!']
+        
+        text = text.strip()
+        
+        if not text:
+            return True
+        
+        return not text[-1] in END_OF_PHRASE_CHARACTERS
+    
+    def _append_accum_transcription(self, frame: TranscriptionFrame):
+        """Append transcription frame to accumulation buffer."""
+        self._last_time_accum_transcription = time.time()
+        self._accum_transcription_frames.append(frame)
+
+    def _handle_first_message(self, text):
+        """Track the first message received for voicemail and duplicate detection."""
+        if self._first_message:
+            return 
+        
+        self._first_message = text
+        self._first_message_time = time.time()
+
+    def _should_ignore_first_repeated_message(self, text):
+        """Check if this is a repeated first message that should be ignored."""
+        if not self._first_message:
+            return False
+        
+        time_since_first_message = time.time() - self._first_message_time
+        if time_since_first_message > IGNORE_REPEATED_MSG_AT_START_SECONDS:
+            return False
+        
+        return is_equivalent_basic(text, self._first_message)
+
+    async def _detect_and_handle_voicemail(self, transcript: str):
+        """Detect and handle voicemail messages."""
+        if not self.detect_voicemail:
+            return False
+
+        logger.debug(f"Checking voicemail: {transcript} at {self._time_since_init():.2f}s")
+        
+        # Only detect voicemail in the first few seconds and after first transcript
+        if self._time_since_init() > VOICEMAIL_DETECTION_SECONDS and self._was_first_transcript_receipt:
+            return False
+        
+        if not voicemail.is_text_voicemail(transcript):
+            return False
+        
+        logger.debug("Voicemail detected")
+
+        await self.push_frame(
+            TranscriptionFrame(transcript, "", time_now_iso8601(), self._get_language_enum())
+        )
+
+        await self.push_frame(
+            VoicemailFrame(transcript)
+        )
+
+        logger.debug("Voicemail pushed")
+        return True
+
+    def _get_language_enum(self):
+        """Convert language string to Language enum."""
+        if self._language == "es":
+            return Language.ES
+        elif self._language == "en":
+            return Language.EN
+        elif self._language == "fr":
+            return Language.FR
+        elif self._language == "pt":
+            return Language.PT
+        elif self._language == "de":
+            return Language.DE
+        elif self._language == "it":
+            return Language.IT
+        else:
+            return Language.EN  # Default fallback
+
+    async def _async_handle_accum_transcription(self, current_time):
+        """Handle accumulated transcription timeout."""
+        if not self._last_interim_time:
+            self._last_interim_time = 0.0
+
+        reference_time = max(self._last_interim_time, self._last_time_accum_transcription)
+
+        if self._fast_response:
+            await self._fast_response_send_accum_transcriptions()
+            return 
+            
+        if current_time - reference_time > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
+            logger.debug("Sending accum transcription because of timeout")
+            await self._send_accum_transcriptions()
+            return
+
+    async def _handle_false_interim(self, current_time):
+        """Detect and handle false interim transcripts."""
+        if not self._user_speaking:
+            return
+        if not self._last_interim_time:
+            return
+
+        last_interim_delay = current_time - self._last_interim_time
+
+        if last_interim_delay > FALSE_INTERIM_SECONDS:
+            return
+
+        logger.debug("False interim detected")
+        await self._handle_user_silence()
+
+    async def _async_handler(self, task_name):
+        """Async handler for timeouts and fast response processing."""
+        while True:
+            if not self.is_monitored_task_active(task_name):
+                return
+
+            await asyncio.sleep(0.1)
+            
+            current_time = time.time()
+
+            await self._async_handle_accum_transcription(current_time)
+            await self._handle_false_interim(current_time)
+
+    async def _fast_response_send_accum_transcriptions(self):
+        """Send accumulated transcriptions immediately if fast response is enabled."""
+        if not self._fast_response:
+            return
+
+        if len(self._accum_transcription_frames) == 0:
+            return
+
+        current_time = time.time()
+        last_message_time = max(self._last_interim_time or 0, self._last_time_accum_transcription)
+
+        is_short_sentence = len(self._accum_transcription_frames) <= 2
+        is_sentence_end = not self._is_accum_transcription(self._accum_transcription_frames[-1].text)
+        time_since_last_message = current_time - last_message_time
+
+        if is_short_sentence:
+            if is_sentence_end:
+                logger.debug("Fast response: Sending accum transcriptions because short sentence and end of phrase")
+                await self._send_accum_transcriptions()
+            
+            if not is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds:
+                logger.debug("Fast response: Sending accum transcriptions because short sentence and timeout")
+                await self._send_accum_transcriptions() 
+        else:
+            if is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds:
+                logger.debug("Fast response: Sending accum transcriptions because long sentence and end of phrase")
+                await self._send_accum_transcriptions()
+            
+            if not is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds * 2:
+                logger.debug("Fast response: Sending accum transcriptions because long sentence and timeout")
+                await self._send_accum_transcriptions()
+
+    def get_stt_response_times(self) -> List[float]:
+        """Get the list of STT response durations."""
+        return self._stt_response_times.copy()
+    
+    def get_average_stt_response_time(self) -> float:
+        """Get the average STT response duration."""
+        if not self._stt_response_times:
+            return 0.0
+        return sum(self._stt_response_times) / len(self._stt_response_times)
+
+    def clear_stt_response_times(self):
+        """Clear the list of STT response durations."""
+        self._stt_response_times.clear()
+
+    def log_stt_performance(self):
+        """Log STT performance statistics."""
+        stats = self.get_stt_stats()
+        if stats["count"] > 0:
+            logger.info(f"🎯 AssemblyAI STT Performance Summary:")
+            logger.info(f"   📊 Total responses: {stats['count']}")
+            logger.info(f"   ⏱️  Average time: {stats['average']}s")
+            logger.info(f"   🏃 Fastest: {stats['min']}s")
+            logger.info(f"   🐌 Slowest: {stats['max']}s")
+            logger.info(f"   🕐 Latest: {stats['latest']}s")
+            logger.info(f"   📈 All times: {[round(t, 3) for t in self._stt_response_times]}")
