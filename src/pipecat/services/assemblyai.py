@@ -890,7 +890,13 @@ class AssemblyAISTTService(STTService):
             await self._handle_false_interim(current_time)
 
     async def _fast_response_send_accum_transcriptions(self):
-        """Send accumulated transcriptions immediately if fast response is enabled."""
+        """Send accumulated transcriptions immediately if fast response is enabled.
+        
+        This method uses aggressive sending logic optimized for conversational latency:
+        - Send IMMEDIATELY when punctuation is detected (sentence end)
+        - Send short unpunctuated phrases after minimal timeout
+        - This matches Deepgram's fast response behavior
+        """
         if not self._fast_response:
             return
 
@@ -899,27 +905,31 @@ class AssemblyAISTTService(STTService):
 
         current_time = time.time()
         last_message_time = max(self._last_interim_time or 0, self._last_time_accum_transcription)
-
-        is_short_sentence = len(self._accum_transcription_frames) <= 2
-        is_sentence_end = not self._is_accum_transcription(self._accum_transcription_frames[-1].text)
         time_since_last_message = current_time - last_message_time
 
-        if is_short_sentence:
-            if is_sentence_end:
-                logger.debug("Fast response: Sending accum transcriptions because short sentence and end of phrase")
-                await self._send_accum_transcriptions()
-            
-            if not is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds:
-                logger.debug("Fast response: Sending accum transcriptions because short sentence and timeout")
-                await self._send_accum_transcriptions() 
-        else:
-            if is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds:
-                logger.debug("Fast response: Sending accum transcriptions because long sentence and end of phrase")
-                await self._send_accum_transcriptions()
-            
-            if not is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds * 2:
-                logger.debug("Fast response: Sending accum transcriptions because long sentence and timeout")
-                await self._send_accum_transcriptions()
+        # Check if last frame has punctuation (sentence end)
+        last_text = self._accum_transcription_frames[-1].text
+        is_sentence_end = not self._is_accum_transcription(last_text)
+
+        # CRITICAL FIX: Always send immediately when punctuation is detected
+        # This ensures proper sentence boundaries for the context aggregator
+        if is_sentence_end:
+            logger.debug(f"Fast response: ✅ Sending immediately - punctuation detected: '{last_text}'")
+            await self._send_accum_transcriptions()
+            return
+
+        # For unpunctuated phrases, use a SHORT timeout to maintain low latency
+        # This is typically only 1-2 words like "hola", "bien", "sí"
+        # Use a very short timeout (0.5s) to send these quickly
+        SHORT_PHRASE_TIMEOUT = 0.5
+        
+        if time_since_last_message > SHORT_PHRASE_TIMEOUT:
+            logger.debug(f"Fast response: ⏰ Sending after timeout ({time_since_last_message:.1f}s) - unpunctuated: '{last_text}'")
+            await self._send_accum_transcriptions()
+            return
+        
+        # Otherwise, wait for more input
+        logger.trace(f"Fast response: ⏳ Holding transcription ({time_since_last_message:.1f}s): '{last_text}'")
 
     def get_stt_response_times(self) -> List[float]:
         """Get the list of STT response durations."""
