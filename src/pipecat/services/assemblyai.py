@@ -511,7 +511,8 @@ class AssemblyAISTTService(STTService):
                         await self._fast_response_send_accum_transcriptions()
                     
                     # Always push interim frames for real-time feedback
-                    await self.push_frame(frame)
+                    await self.push_frame(frame, FrameDirection.DOWNSTREAM)  # 🔥 ADDED DOWNSTREAM
+
                     logger.debug(f"   ✅ Interim frame pushed to pipeline")
             
             elif message_type == 'Error':
