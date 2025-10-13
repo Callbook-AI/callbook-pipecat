@@ -551,22 +551,23 @@ class AssemblyAISTTService(STTService):
             logger.debug(f"   └─ VAD active: {self._vad_active}, Bot speaking: {self._bot_speaking}")
 
     async def _send_accum_transcriptions(self):
-        """Send accumulated transcriptions and reset buffer.
-        
-        Following Deepgram's pattern for sentence-based transcript accumulation.
-        """
         if not len(self._accum_transcription_frames):
             return
 
         logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
 
-        await self._handle_user_speaking()
+        # ❌ REMOVE THIS - User already stopped!
+        # await self._handle_user_speaking()
 
         for frame in self._accum_transcription_frames:
             await self.push_frame(frame)
         
         self._accum_transcription_frames = []
-        await self._handle_user_silence()
+        
+        # Only send UserStoppedSpeakingFrame if user is still speaking
+        if self._user_speaking:
+            await self._handle_user_silence()
+        
         await self.stop_processing_metrics()
 
     def get_stt_stats(self) -> Dict:
