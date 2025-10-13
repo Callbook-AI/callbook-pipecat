@@ -380,9 +380,6 @@ class AssemblyAISTTService(STTService):
             message_type = data.get('type')
             
             if message_type == 'Turn':
-
-                logger.info(f"{self}: RAW Turn message: {json.dumps(data, indent=2)}")
-
                 transcript = data.get('transcript', '')
                 
                 if not transcript:
@@ -390,6 +387,22 @@ class AssemblyAISTTService(STTService):
                 
                 # Check if it's a formatted turn (final) or interim
                 is_formatted = data.get('turn_is_formatted', False)
+                
+                # Calculate average confidence from word-level confidence scores
+                words = data.get('words', [])
+                confidence = self._calculate_average_confidence(words)
+                
+                # Filter low-confidence interim transcripts (like Deepgram does)
+                # Deepgram filters out interims with confidence < 0.85-0.90
+                if not is_formatted and confidence < 0.85:
+                    logger.debug(f"{self}: Ignoring low-confidence interim (conf={confidence:.2f}): '{transcript}'")
+                    return
+                
+                # Filter single-word interim transcripts with low confidence
+                word_count = len(transcript.strip().split())
+                if not is_formatted and word_count == 1 and confidence < 0.90:
+                    logger.debug(f"{self}: Ignoring single-word low-confidence interim (conf={confidence:.2f}): '{transcript}'")
+                    return
                 
                 # Stop TTFB metrics on first transcript
                 await self.stop_ttfb_metrics()
@@ -399,9 +412,10 @@ class AssemblyAISTTService(STTService):
                 word_count = len(transcript.split())
                 current_time = time.time()
                 
-                logger.info(f"📝 AssemblyAI {transcript_type}: '{transcript}'")
+                logger.info(f"📝 AssemblyAI {transcript_type}: '{transcript}' (confidence: {confidence:.2f})")
                 logger.debug(f"   ├─ Words: {word_count} | Bot speaking: {self._bot_speaking} | User speaking: {self._user_speaking}")
                 logger.debug(f"   ├─ VAD active: {self._vad_active} | Allow interruptions: {self._allow_stt_interruptions}")
+                logger.debug(f"   ├─ Confidence: {confidence:.2f} | Words with confidence: {len(words)}")
                 
                 # Log timing information for debugging
                 if self._last_interim_time:
@@ -821,6 +835,30 @@ class AssemblyAISTTService(STTService):
             return Language.IT
         else:
             return Language.EN  # Default fallback
+
+    def _calculate_average_confidence(self, words: List[Dict]) -> float:
+        """Calculate average confidence from word-level confidence scores.
+        
+        Args:
+            words: List of word dictionaries with 'confidence' scores
+            
+        Returns:
+            Average confidence score (0.0-1.0), or 1.0 if no words provided
+        """
+        if not words:
+            return 1.0
+        
+        # Extract confidence scores from words
+        confidences = [word.get('confidence', 1.0) for word in words if word.get('word_is_final', False)]
+        
+        if not confidences:
+            # If no final words, use all words
+            confidences = [word.get('confidence', 1.0) for word in words]
+        
+        if not confidences:
+            return 1.0
+        
+        return sum(confidences) / len(confidences)
 
     async def _async_handle_accum_transcription(self, current_time):
         """Handle accumulated transcription timeout."""
