@@ -459,7 +459,8 @@ class AssemblyAISTTService(STTService):
                         logger.info(f"{self}: User interrupted bot with: '{transcript}'")
                         await self.push_frame(StartInterruptionFrame(), FrameDirection.UPSTREAM)
                     
-                    await self._handle_user_speaking()
+                    # ❌ REMOVED: await self._handle_user_speaking()
+                    # The interim already called this - don't re-trigger user started speaking!
                     
                     frame = TranscriptionFrame(
                         transcript, 
