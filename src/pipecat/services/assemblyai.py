@@ -568,21 +568,18 @@ class AssemblyAISTTService(STTService):
 
         logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
 
-        # ❌ PROBLEM: Sending LLMMessagesFrame directly bypasses transcript processor
-        # This loses all conversation context!
-        
-        # ✅ FIX: Send TranscriptionFrame instead to go through normal pipeline
-        from pipecat.frames.frames import TranscriptionFrame
+        # ✅ Send as TranscriptionFrame to go through TranscriptProcessor
+        # This ensures proper context aggregation and transcript handling
         
         # Combine all transcripts into one message
         full_text = " ".join([frame.text for frame in self._accum_transcription_frames])
         
         logger.debug(f"📝 Sending transcript as TranscriptionFrame: '{full_text}'")
         
-        # ✅ Store what we're sending
+        # ✅ Store what we're sending for deduplication
         self._last_sent_transcript = full_text.strip()
         
-        # Push as TranscriptionFrame - goes through transcript processor and aggregates context
+        # Push as TranscriptionFrame - will go through transcript processor
         await self.push_frame(
             TranscriptionFrame(
                 full_text,
@@ -590,7 +587,7 @@ class AssemblyAISTTService(STTService):
                 time_now_iso8601(),
                 self._get_language_enum()
             ),
-            FrameDirection.DOWNSTREAM
+            FrameDirection.DOWNSTREAM  # Important: DOWNSTREAM not UPSTREAM
         )
         
         self._accum_transcription_frames = []
