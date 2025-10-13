@@ -511,8 +511,7 @@ class AssemblyAISTTService(STTService):
                         await self._fast_response_send_accum_transcriptions()
                     
                     # Always push interim frames for real-time feedback
-                    await self.push_frame(frame, FrameDirection.DOWNSTREAM)  # 🔥 ADDED DOWNSTREAM
-
+                    await self.push_frame(frame)
                     logger.debug(f"   ✅ Interim frame pushed to pipeline")
             
             elif message_type == 'Error':
@@ -558,9 +557,25 @@ class AssemblyAISTTService(STTService):
 
         logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
 
-        for frame in self._accum_transcription_frames:
-            # 🔥 Push DOWNSTREAM to avoid BaseInputTransport processing
-            await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+        # 🔥 MINIMAL FIX: Push LLMMessagesFrame instead of TranscriptionFrame
+        # This goes directly to context aggregator, bypassing transcript processor
+        # and avoiding BaseInputTransport.process_frame() that emulates speech events
+        
+        from pipecat.frames.frames import LLMMessagesFrame
+        
+        # Combine all transcripts into one message
+        full_text = " ".join([frame.text for frame in self._accum_transcription_frames])
+        
+        logger.debug(f"📝 Sending transcript as LLMMessagesFrame: '{full_text}'")
+        
+        # Push directly as LLM message - skips transcript processor
+        await self.push_frame(
+            LLMMessagesFrame([{
+                "role": "user",
+                "content": full_text
+            }]),
+            FrameDirection.DOWNSTREAM
+        )
         
         self._accum_transcription_frames = []
         
