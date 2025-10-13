@@ -557,11 +557,9 @@ class AssemblyAISTTService(STTService):
 
         logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
 
-        # ❌ REMOVE THIS - User already stopped!
-        # await self._handle_user_speaking()
-
         for frame in self._accum_transcription_frames:
-            await self.push_frame(frame)
+            # 🔥 Push DOWNSTREAM to avoid BaseInputTransport processing
+            await self.push_frame(frame, FrameDirection.DOWNSTREAM)
         
         self._accum_transcription_frames = []
         
