@@ -359,7 +359,6 @@ class AssemblyAISTTService(STTService):
             except Exception as e:
                 logger.error(f"{self}: Error in receive task: {e}")
                 break
-
     async def _on_message(self, data: Dict):
         """Process incoming transcription message.
         
@@ -453,6 +452,14 @@ class AssemblyAISTTService(STTService):
                         self._current_speech_start_time = None
                         self._audio_chunk_count = 0
                         logger.debug(f"🔄 {self}: Reset speech timing counters")
+                    
+                    # ✅ FIX: Check if we already sent this exact transcript via fast response
+                    # This prevents duplicate sends when fast response sent the interim
+                    if self._accum_transcription_frames:
+                        last_sent_text = self._accum_transcription_frames[-1].text.strip()
+                        if transcript.strip() == last_sent_text:
+                            logger.debug(f"⏭️ Skipping FINAL - already sent via fast response: '{transcript}'")
+                            return
                     
                     # Send interruption if bot was speaking
                     if self._bot_speaking and self._allow_stt_interruptions:
