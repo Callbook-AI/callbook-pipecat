@@ -138,6 +138,7 @@ class AssemblyAISTTService(STTService):
         
         # VAD state tracking (like Deepgram)
         self._vad_active = False
+        self._vad_inactive_time = None  # Track when VAD became inactive for grace period
         
         # Audio buffering - AssemblyAI strictly requires 50-1000ms chunks (enforced with error 3005)
         # We use 50ms minimum for best responsiveness while meeting their requirements
@@ -590,10 +591,12 @@ class AssemblyAISTTService(STTService):
             logger.info("🎤 AssemblyAISTTService: VAD active (user making noise)")
             logger.debug(f"   └─ User speaking: {self._user_speaking}, Bot speaking: {self._bot_speaking}")
             self._vad_active = True
+            self._vad_inactive_time = None  # Clear inactive timestamp when VAD becomes active
         elif isinstance(frame, VADInactiveFrame):
             logger.info("🎤 AssemblyAISTTService: VAD inactive (user silent)")
             logger.debug(f"   └─ User speaking: {self._user_speaking}, Bot speaking: {self._bot_speaking}")
             self._vad_active = False
+            self._vad_inactive_time = time.time()  # Record when VAD became inactive
 
     async def _handle_bot_speaking(self):
         """Handle bot started speaking event."""
@@ -632,12 +635,23 @@ class AssemblyAISTTService(STTService):
             logger.debug(f"{self}: Ignoring repeated first message")
             return True
         
-        # If VAD is inactive for interim transcripts, ignore (user not actually speaking)
-        # This is critical for filtering out external talking picked up by the microphone
-        # Only the intended user should trigger VAD, so VAD inactive = not the user speaking
+        # If VAD is inactive for interim transcripts, check if we're in grace period
+        # Grace period allows transcripts that AssemblyAI is still processing from audio
+        # received before VAD went inactive (accounts for STT processing lag)
         if not self._vad_active and not is_formatted:
-            logger.debug(f"{self}: Ignoring interim transcript because VAD inactive (likely external speech or noise): '{transcript}'")
-            return True
+            # Allow transcripts within 2 seconds of VAD becoming inactive
+            # This accounts for AssemblyAI's processing delay
+            if self._vad_inactive_time:
+                time_since_vad_inactive = time.time() - self._vad_inactive_time
+                if time_since_vad_inactive < 2.0:
+                    logger.debug(f"{self}: Accepting interim transcript despite VAD inactive (within grace period: {time_since_vad_inactive:.3f}s): '{transcript}'")
+                else:
+                    logger.debug(f"{self}: Ignoring interim transcript because VAD inactive too long ({time_since_vad_inactive:.3f}s, likely external speech): '{transcript}'")
+                    return True
+            else:
+                # VAD was never inactive during this session, filter it
+                logger.debug(f"{self}: Ignoring interim transcript because VAD inactive (likely external speech or noise): '{transcript}'")
+                return True
         
         # If bot is speaking and interruptions are not allowed
         logger.debug(f"Bot speaking: {self._bot_speaking} | allow_interruptions: {self._allow_stt_interruptions}")
