@@ -557,11 +557,6 @@ class AssemblyAISTTService(STTService):
             self._user_speaking = False
             self._current_speech_start_time = None
             
-            # Flush any accumulated transcriptions before marking user as stopped
-            # This ensures finals without punctuation are sent immediately
-            if len(self._accum_transcription_frames) > 0:
-                logger.info(f"💬 Flushing {len(self._accum_transcription_frames)} accumulated transcript(s) before user silence")
-                await self._send_accum_transcriptions()
             
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
             logger.info(f"👤 {self}: User stopped speaking")
