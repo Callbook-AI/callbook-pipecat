@@ -131,6 +131,7 @@ class AssemblyAISTTService(STTService):
         
         self._vad_active = False
         self._vad_inactive_time = None 
+        self._last_sent_transcript = None
         
         self._audio_buffer = bytearray()
         self._min_buffer_size = int((sample_rate or 16000) * 2 * 0.05)  # 50ms of 16-bit audio (1600 bytes @ 16kHz)
@@ -453,11 +454,24 @@ class AssemblyAISTTService(STTService):
                         self._audio_chunk_count = 0
                         logger.debug(f"🔄 {self}: Reset speech timing counters")
                     
-                    # ✅ FIX: Check if we already sent this exact transcript via fast response
-                    if self._last_sent_transcript and transcript.strip() == self._last_sent_transcript:
-                        logger.debug(f"⏭️ Skipping FINAL - already sent via fast response: '{transcript}'")
-                        self._last_sent_transcript = None  # Clear for next time
-                        return
+                    # ✅ FIX: Check if we already sent this transcript (or a prefix) via fast response
+                    if self._last_sent_transcript:
+                        transcript_stripped = transcript.strip()
+                        
+                        # Exact match - skip completely
+                        if transcript_stripped == self._last_sent_transcript:
+                            logger.debug(f"⏭️ Skipping FINAL - exact duplicate via fast response: '{transcript}'")
+                            self._last_sent_transcript = None
+                            return
+                        
+                        # FINAL extends what we already sent - skip completely
+                        if transcript_stripped.startswith(self._last_sent_transcript):
+                            logger.debug(f"⏭️ Skipping FINAL - extends fast response ('{self._last_sent_transcript}' → '{transcript_stripped}')")
+                            self._last_sent_transcript = None
+                            return
+                        
+                        # Clear for next time if different transcript
+                        self._last_sent_transcript = None
                     
                     # Send interruption if bot was speaking
                     if self._bot_speaking and self._allow_stt_interruptions:
@@ -559,16 +573,15 @@ class AssemblyAISTTService(STTService):
 
         logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
 
-        # 🔥 MINIMAL FIX: Push LLMMessagesFrame instead of TranscriptionFrame
-        # This goes directly to context aggregator, bypassing transcript processor
-        # and avoiding BaseInputTransport.process_frame() that emulates speech events
-        
         from pipecat.frames.frames import LLMMessagesFrame
         
         # Combine all transcripts into one message
         full_text = " ".join([frame.text for frame in self._accum_transcription_frames])
         
         logger.debug(f"📝 Sending transcript as LLMMessagesFrame: '{full_text}'")
+        
+        # ✅ Store what we're sending
+        self._last_sent_transcript = full_text.strip()
         
         # Push directly as LLM message - skips transcript processor
         await self.push_frame(
