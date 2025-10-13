@@ -380,6 +380,9 @@ class AssemblyAISTTService(STTService):
             message_type = data.get('type')
             
             if message_type == 'Turn':
+
+                logger.info(f"{self}: RAW Turn message: {json.dumps(data, indent=2)}")
+
                 transcript = data.get('transcript', '')
                 
                 if not transcript:
