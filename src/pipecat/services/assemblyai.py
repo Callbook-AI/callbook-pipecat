@@ -98,12 +98,10 @@ class AssemblyAISTTService(STTService):
         self._on_no_punctuation_seconds = on_no_punctuation_seconds
         self._false_interim_seconds = false_interim_seconds  # Configurable threshold for user idle detection
         
-        # Bot speaking state (for interruption handling)
         self._bot_speaking = True  # Start as True like Deepgram
         self._bot_has_ever_spoken = False  # Track if bot has spoken at least once
         self._bot_started_speaking_time = None  # Track when bot started speaking
         
-        # Optimized settings following Deepgram pattern
         self._settings = {
             "sample_rate": sample_rate or 16000,
             "format_turns": format_turns,
@@ -111,37 +109,29 @@ class AssemblyAISTTService(STTService):
             "speech_threshold": speech_threshold,  # More sensitive to low volume
         }
         
-        # Add word boost if provided (helps with common words like "hola", "bien")
         if word_boost:
             self._settings["word_boost"] = word_boost
         
-        # Performance tracking (enhanced like Deepgram)
         self._stt_response_times = []
         self._current_speech_start_time = None
         self._last_audio_chunk_time = None
         self._audio_chunk_count = 0
         self._connection_active = False
         
-        # Accumulation for sentence handling (like Deepgram)
         self._accum_transcription_frames = []
         self._last_time_accum_transcription = time.time()
         self._last_interim_time = None
         
-        # First message tracking (for voicemail and repeated message detection)
         self._first_message = None
         self._first_message_time = None
         self._was_first_transcript_receipt = False
         
-        # Timing tracking
         self.start_time = time.time()
         self._last_time_transcription = time.time()
         
-        # VAD state tracking (like Deepgram)
         self._vad_active = False
-        self._vad_inactive_time = None  # Track when VAD became inactive for grace period
+        self._vad_inactive_time = None 
         
-        # Audio buffering - AssemblyAI strictly requires 50-1000ms chunks (enforced with error 3005)
-        # We use 50ms minimum for best responsiveness while meeting their requirements
         self._audio_buffer = bytearray()
         self._min_buffer_size = int((sample_rate or 16000) * 2 * 0.05)  # 50ms of 16-bit audio (1600 bytes @ 16kHz)
         self._max_buffer_time = 0.05  # Force send after 50ms minimum
@@ -393,14 +383,14 @@ class AssemblyAISTTService(STTService):
                 confidence = self._calculate_average_confidence(words)
                 
                 # Filter low-confidence interim transcripts (like Deepgram does)
-                # Deepgram filters out interims with confidence < 0.85-0.90
-                if not is_formatted and confidence < 0.85:
+                # Lowered from 0.85 to 0.70 to match Deepgram's more permissive behavior
+                if not is_formatted and confidence < 0.70:
                     logger.debug(f"{self}: Ignoring low-confidence interim (conf={confidence:.2f}): '{transcript}'")
                     return
                 
                 # Filter single-word interim transcripts with low confidence
                 word_count = len(transcript.strip().split())
-                if not is_formatted and word_count == 1 and confidence < 0.90:
+                if not is_formatted and word_count == 1 and confidence < 0.75:
                     logger.debug(f"{self}: Ignoring single-word low-confidence interim (conf={confidence:.2f}): '{transcript}'")
                     return
                 
@@ -511,6 +501,13 @@ class AssemblyAISTTService(STTService):
                         timestamp,
                         language
                     )
+                    
+                    # Accumulate interim transcription for fast response (like Deepgram)
+                    self._append_accum_transcription(frame)
+                    
+                    # Send accumulated transcriptions if fast response is enabled
+                    if self._fast_response:
+                        await self._fast_response_send_accum_transcriptions()
                     
                     # Always push interim frames for real-time feedback
                     await self.push_frame(frame)
@@ -649,22 +646,14 @@ class AssemblyAISTTService(STTService):
         Returns:
             True if the transcription should be ignored, False otherwise
         """
-        # Check if fast greeting should be ignored
         time_start = self._time_since_init()
         if self._should_ignore_fast_greeting(transcript, time_start):
             return True
         
-        # Check for repeated first message
         if self._should_ignore_first_repeated_message(transcript):
             logger.debug(f"{self}: Ignoring repeated first message")
             return True
-        
-        # If VAD is inactive for interim transcripts, check if we're in grace period
-        # Grace period allows transcripts that AssemblyAI is still processing from audio
-        # received before VAD went inactive (accounts for STT processing lag)
         if not self._vad_active and not is_formatted:
-            # Allow transcripts within 2 seconds of VAD becoming inactive
-            # This accounts for AssemblyAI's processing delay
             if self._vad_inactive_time:
                 time_since_vad_inactive = time.time() - self._vad_inactive_time
                 if time_since_vad_inactive < 2.0:
@@ -677,49 +666,37 @@ class AssemblyAISTTService(STTService):
                 logger.debug(f"{self}: Ignoring interim transcript because VAD inactive (likely external speech or noise): '{transcript}'")
                 return True
         
-        # If bot is speaking and interruptions are not allowed
         logger.debug(f"Bot speaking: {self._bot_speaking} | allow_interruptions: {self._allow_stt_interruptions}")
         if self._bot_speaking and not self._allow_stt_interruptions:
             if is_formatted:
                 logger.debug(f"{self}: Ignoring FINAL transcription because bot is speaking and interruptions disabled: '{transcript}'")
                 return True
             else:
-                # Allow interim transcripts through for UI feedback even when bot is speaking
                 return False
         
-        # Enhanced interruption filtering when bot is speaking
-        # This prevents false positives from external talking, echoes, or background noise
         if self._bot_speaking:
             word_count = self._transcript_words_count(transcript)
             
-            # Single word = always ignore when bot speaking (high chance of false positive)
             if word_count == 1:
                 logger.debug(f"{self}: Ignoring interruption because bot is speaking (single word, likely false positive): '{transcript}'")
                 return True
             
-            # For 2-word phrases when bot is speaking, be more conservative
-            # Require it to be a final transcript to reduce false positives
             if word_count == 2 and not is_formatted:
                 logger.debug(f"{self}: Ignoring interruption - bot speaking, short interim phrase (likely false positive): '{transcript}'")
                 return True
             
-            # Check if interruption is too soon after bot started speaking
-            # This catches echo or immediate false detections (e.g., bot's own speech being picked up)
             if self._bot_started_speaking_time:
                 time_since_bot_started = time.time() - self._bot_started_speaking_time
                 if time_since_bot_started < 1.5:  # Less than 1.5 seconds
                     logger.debug(f"{self}: Ignoring interruption - too soon after bot started speaking ({time_since_bot_started:.2f}s, likely echo): '{transcript}'")
                     return True
             
-            # Check if this transcript is very recent to last transcription
-            # Helps filter duplicate/echo transcriptions or rapid successive false positives
             if self._last_time_transcription:
                 time_since_last = time.time() - self._last_time_transcription
                 if time_since_last < 2.0:
                     logger.debug(f"{self}: Ignoring interruption - too soon after last transcript ({time_since_last:.2f}s, possible echo/duplicate): '{transcript}'")
                     return True
         
-        # If interruptions are allowed, let everything through
         return False
 
     def _time_since_init(self):
@@ -739,21 +716,17 @@ class AssemblyAISTTService(STTService):
         - If bot hasn't spoken yet: ignore
         - If bot has spoken at least once: allow (return False)
         """
-        # Only applies to single-word transcripts within first second
         if time_start >= 1 or self._transcript_words_count(transcript) != 1:
             return False
 
-        # Ignore if bot is currently speaking
         if self._bot_speaking:
             logger.debug("Ignoring fast greeting - bot is speaking")
             return True
 
-        # Ignore if bot hasn't spoken yet (prevents false early detections)
         if not self._bot_has_ever_spoken:
             logger.debug("Ignoring fast greeting - bot hasn't spoken yet")
             return True
 
-        # Allow if bot has spoken at least once (user responding)
         logger.debug("Accepting fast greeting - bot has spoken at least once")
         return False
 
@@ -948,42 +921,31 @@ class AssemblyAISTTService(STTService):
         last_message_time = max(self._last_interim_time or 0, self._last_time_accum_transcription)
         time_since_last_message = current_time - last_message_time
 
-        # Check if last frame has punctuation (sentence end)
         last_text = self._accum_transcription_frames[-1].text
         is_sentence_end = not self._is_accum_transcription(last_text)
         
-        # Count frames to determine sentence length
         is_short_sentence = len(self._accum_transcription_frames) <= 2
 
-        # CRITICAL: Match Deepgram's streaming behavior
-        # Short sentences with punctuation = IMMEDIATE send (enables fast TTS start)
         if is_short_sentence and is_sentence_end:
             logger.debug(f"Fast response: ✅ Sending immediately - short sentence with punctuation: '{last_text}'")
             await self._send_accum_transcriptions()
             return
         
-        # Short sentences without punctuation = send after brief timeout
-        # This catches single-word responses like "Sí", "Hola", "Bien"
         if is_short_sentence and not is_sentence_end and time_since_last_message > 0.5:
             logger.debug(f"Fast response: ⏰ Sending short unpunctuated after timeout: '{last_text}'")
             await self._send_accum_transcriptions()
             return
 
-        # Long sentences with punctuation = send after standard timeout
-        # This ensures we don't cut off mid-sentence but still respond quickly
         if not is_short_sentence and is_sentence_end:
             logger.debug(f"Fast response: ✅ Sending immediately - long sentence with punctuation: '{last_text}'")
             await self._send_accum_transcriptions()
             return
 
-        # Long sentences without punctuation = wait longer for completion
-        # Use 2x timeout to avoid cutting off complex sentences
         if not is_short_sentence and not is_sentence_end and time_since_last_message > (self._on_no_punctuation_seconds * 2):
             logger.debug(f"Fast response: ⏰ Sending long unpunctuated after extended timeout: '{last_text}'")
             await self._send_accum_transcriptions()
             return
         
-        # Otherwise, wait for more input
         logger.trace(f"Fast response: ⏳ Holding transcription ({time_since_last_message:.1f}s, {len(self._accum_transcription_frames)} frames): '{last_text}'")
 
     def get_stt_response_times(self) -> List[float]:
