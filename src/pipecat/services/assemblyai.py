@@ -25,6 +25,8 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    VADActiveFrame,
+    VADInactiveFrame,
     VoicemailFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
@@ -131,6 +133,9 @@ class AssemblyAISTTService(STTService):
         # Timing tracking
         self.start_time = time.time()
         self._last_time_transcription = time.time()
+        
+        # VAD state tracking (like Deepgram)
+        self._vad_active = False
         
         # Audio buffering - AssemblyAI strictly requires 50-1000ms chunks (enforced with error 3005)
         # We use 50ms minimum for best responsiveness while meeting their requirements
@@ -538,7 +543,7 @@ class AssemblyAISTTService(STTService):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames for bot speaking state and interruption handling.
         
-        Following Deepgram's pattern for handling bot speaking state.
+        Following Deepgram's pattern for handling bot speaking state and VAD tracking.
         """
         await super().process_frame(frame, direction)
         
@@ -547,6 +552,14 @@ class AssemblyAISTTService(STTService):
             await self._handle_bot_speaking()
         elif isinstance(frame, BotStoppedSpeakingFrame):
             await self._handle_bot_silence()
+        
+        # Handle VAD state for false interim detection (like Deepgram)
+        elif isinstance(frame, VADActiveFrame):
+            logger.debug("🎤 AssemblyAISTTService: VAD active")
+            self._vad_active = True
+        elif isinstance(frame, VADInactiveFrame):
+            logger.debug("🎤 AssemblyAISTTService: VAD inactive")
+            self._vad_active = False
 
     async def _handle_bot_speaking(self):
         """Handle bot started speaking event."""
@@ -586,10 +599,22 @@ class AssemblyAISTTService(STTService):
                 # Allow interim transcripts through for UI feedback even when bot is speaking
                 return False
         
-        # Ignore single word interruptions when bot is speaking (even if interruptions allowed)
-        if self._bot_speaking and self._transcript_words_count(transcript) == 1:
-            logger.debug(f"{self}: Ignoring interruption because bot is speaking (single word): {transcript}")
-            return True
+        # Ignore short interruptions when bot is speaking (even if interruptions allowed)
+        # Require at least 2 words to interrupt bot (like Deepgram)
+        if self._bot_speaking:
+            word_count = self._transcript_words_count(transcript)
+            
+            # Single word = always ignore when bot speaking
+            if word_count == 1:
+                logger.debug(f"{self}: Ignoring interruption because bot is speaking (single word): {transcript}")
+                return True
+            
+            # Check if interruption is too soon after bot started speaking
+            if self._bot_started_speaking_time:
+                time_since_bot_started = time.time() - self._bot_started_speaking_time
+                if time_since_bot_started < 1.5:  # Less than 1.5 seconds
+                    logger.debug(f"{self}: Ignoring interruption - too soon after bot started speaking ({time_since_bot_started:.2f}s): '{transcript}'")
+                    return True
         
         # If interruptions are allowed, let everything through
         return False
@@ -729,6 +754,12 @@ class AssemblyAISTTService(STTService):
         if not self._user_speaking:
             return
         if not self._last_interim_time:
+            return
+        
+        # CRITICAL: Don't detect false interims when VAD is active (user still making noise)
+        # This prevents premature "user stopped speaking" signals while user is mid-sentence
+        # This matches Deepgram's behavior exactly
+        if self._vad_active:
             return
 
         last_interim_delay = current_time - self._last_interim_time
