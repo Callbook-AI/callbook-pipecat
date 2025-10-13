@@ -633,19 +633,7 @@ class AssemblyAISTTService(STTService):
         logger.debug(f"🤖 {self}: Bot stopped speaking")
 
     async def _should_ignore_transcription(self, transcript: str, is_formatted: bool) -> bool:
-        """Determine if a transcription should be ignored.
-        
-        Following Deepgram's pattern for filtering transcriptions during bot speech.
-        Enhanced with VAD state, word count, and timing checks to reduce false positives
-        from external talking, background noise, and echoes.
-        
-        Args:
-            transcript: The transcription text to evaluate
-            is_formatted: Whether this is a final/formatted transcript
-        
-        Returns:
-            True if the transcription should be ignored, False otherwise
-        """
+        """Determine if a transcription should be ignored."""
         time_start = self._time_since_init()
         if self._should_ignore_fast_greeting(transcript, time_start):
             return True
@@ -653,6 +641,7 @@ class AssemblyAISTTService(STTService):
         if self._should_ignore_first_repeated_message(transcript):
             logger.debug(f"{self}: Ignoring repeated first message")
             return True
+            
         if not self._vad_active and not is_formatted:
             if self._vad_inactive_time:
                 time_since_vad_inactive = time.time() - self._vad_inactive_time
@@ -662,7 +651,6 @@ class AssemblyAISTTService(STTService):
                     logger.debug(f"{self}: Ignoring interim transcript because VAD inactive too long ({time_since_vad_inactive:.3f}s, likely external speech): '{transcript}'")
                     return True
             else:
-                # VAD was never inactive during this session, filter it
                 logger.debug(f"{self}: Ignoring interim transcript because VAD inactive (likely external speech or noise): '{transcript}'")
                 return True
         
@@ -681,19 +669,19 @@ class AssemblyAISTTService(STTService):
                 logger.debug(f"{self}: Ignoring interruption because bot is speaking (single word, likely false positive): '{transcript}'")
                 return True
             
-            if word_count == 2 and not is_formatted:
-                logger.debug(f"{self}: Ignoring interruption - bot speaking, short interim phrase (likely false positive): '{transcript}'")
-                return True
+            # REMOVED: The word_count == 2 check - too aggressive
             
             if self._bot_started_speaking_time:
                 time_since_bot_started = time.time() - self._bot_started_speaking_time
-                if time_since_bot_started < 1.5:  # Less than 1.5 seconds
+                # CHANGED: Reduced from 1.5 to 0.8 seconds
+                if time_since_bot_started < 0.8:
                     logger.debug(f"{self}: Ignoring interruption - too soon after bot started speaking ({time_since_bot_started:.2f}s, likely echo): '{transcript}'")
                     return True
             
             if self._last_time_transcription:
                 time_since_last = time.time() - self._last_time_transcription
-                if time_since_last < 2.0:
+                # CHANGED: Reduced from 2.0 to 1.0 seconds
+                if time_since_last < 1.0:
                     logger.debug(f"{self}: Ignoring interruption - too soon after last transcript ({time_since_last:.2f}s, possible echo/duplicate): '{transcript}'")
                     return True
         
@@ -937,49 +925,44 @@ class AssemblyAISTTService(STTService):
             await self._handle_false_interim(current_time)
 
     async def _fast_response_send_accum_transcriptions(self):
-        """Send accumulated transcriptions immediately if fast response is enabled.
-        
-        This method uses aggressive sending logic optimized for conversational latency:
-        - Send IMMEDIATELY when punctuation is detected (sentence end)
-        - Send short unpunctuated phrases after minimal timeout
-        - Matches Deepgram's streaming behavior for parallel LLM+TTS processing
-        """
+        """Send accumulated transcriptions immediately if fast response is enabled."""
         if not self._fast_response:
             return
-
+    
         if len(self._accum_transcription_frames) == 0:
             return
-
+    
         current_time = time.time()
         last_message_time = max(self._last_interim_time or 0, self._last_time_accum_transcription)
         time_since_last_message = current_time - last_message_time
-
+    
         last_text = self._accum_transcription_frames[-1].text
         is_sentence_end = not self._is_accum_transcription(last_text)
         
-        is_short_sentence = len(self._accum_transcription_frames) <= 2
-
-        if is_short_sentence and is_sentence_end:
-            logger.debug(f"Fast response: ✅ Sending immediately - short sentence with punctuation: '{last_text}'")
+        # CHANGED: Only consider length of text, not frame count (since we deduplicate now)
+        word_count = len(last_text.split())
+        is_short_sentence = word_count <= 5  # Changed from frame count to word count
+    
+        # PRIORITY 1: Always send immediately when punctuation detected
+        if is_sentence_end:
+            logger.debug(f"Fast response: ✅ Sending immediately - sentence with punctuation: '{last_text}'")
             await self._send_accum_transcriptions()
             return
         
-        if is_short_sentence and not is_sentence_end and time_since_last_message > 0.5:
-            logger.debug(f"Fast response: ⏰ Sending short unpunctuated after timeout: '{last_text}'")
-            await self._send_accum_transcriptions()
-            return
-
-        if not is_short_sentence and is_sentence_end:
-            logger.debug(f"Fast response: ✅ Sending immediately - long sentence with punctuation: '{last_text}'")
-            await self._send_accum_transcriptions()
-            return
-
-        if not is_short_sentence and not is_sentence_end and time_since_last_message > (self._on_no_punctuation_seconds * 2):
-            logger.debug(f"Fast response: ⏰ Sending long unpunctuated after extended timeout: '{last_text}'")
+        # PRIORITY 2: For unpunctuated text, wait longer to avoid sending partials
+        # Only send if we haven't received updates for a while AND we have substantial text
+        if word_count >= 8 and time_since_last_message > 1.5:
+            logger.debug(f"Fast response: ⏰ Sending substantial unpunctuated after timeout ({word_count} words): '{last_text}'")
             await self._send_accum_transcriptions()
             return
         
-        logger.trace(f"Fast response: ⏳ Holding transcription ({time_since_last_message:.1f}s, {len(self._accum_transcription_frames)} frames): '{last_text}'")
+        # PRIORITY 3: For really short phrases, wait even longer
+        if word_count <= 5 and time_since_last_message > 2.0:
+            logger.debug(f"Fast response: ⏰ Sending short unpunctuated after extended timeout: '{last_text}'")
+            await self._send_accum_transcriptions()
+            return
+            
+        logger.trace(f"Fast response: ⏳ Holding transcription ({time_since_last_message:.1f}s, {word_count} words): '{last_text}'")
 
     def get_stt_response_times(self) -> List[float]:
         """Get the list of STT response durations."""
