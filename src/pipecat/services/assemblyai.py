@@ -568,9 +568,6 @@ class AssemblyAISTTService(STTService):
 
         logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
 
-        # ✅ Send as TranscriptionFrame to go through TranscriptProcessor
-        # This ensures proper context aggregation and transcript handling
-        
         # Combine all transcripts into one message
         full_text = " ".join([frame.text for frame in self._accum_transcription_frames])
         
@@ -578,6 +575,16 @@ class AssemblyAISTTService(STTService):
         
         # ✅ Store what we're sending for deduplication
         self._last_sent_transcript = full_text.strip()
+        
+        # ⚡ CRITICAL: Send UserStoppedSpeakingFrame BEFORE TranscriptionFrame
+        # This signals to the pipeline that the user is done speaking and the 
+        # transcript should be processed immediately without waiting for timeout.
+        # This is what eliminates the 2-3s latency!
+        if self._user_speaking:
+            self._user_speaking = False
+            self._current_speech_start_time = None
+            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+            logger.debug(f"⚡ Sent UserStoppedSpeakingFrame BEFORE transcript for immediate processing")
         
         # Push as TranscriptionFrame - will go through transcript processor
         await self.push_frame(
@@ -591,10 +598,6 @@ class AssemblyAISTTService(STTService):
         )
         
         self._accum_transcription_frames = []
-        
-        # Only send UserStoppedSpeakingFrame if user is still speaking
-        if self._user_speaking:
-            await self._handle_user_silence()
         
         await self.stop_processing_metrics()
 
