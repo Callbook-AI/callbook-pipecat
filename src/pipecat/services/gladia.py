@@ -78,9 +78,9 @@ class GladiaSTTService(STTService):
     """
 
     class InputParams(BaseModel):
-        language: Optional[Language] = Language.EN_US
-        model: str = "fast"  # "fast" for speed, "accurate" for quality
-        endpointing_delay: int = 400  # Milliseconds
+        language: Language = Language.EN_US
+        model: str = "fast"
+        endpointing_delay: int = 400
         allow_interruptions: bool = True
         detect_voicemail: bool = True
 
@@ -121,7 +121,6 @@ class GladiaSTTService(STTService):
         self._last_time_accum_transcription = time.time()
         self._last_time_transcription = time.time()
 
-        # Performance tracking
         self.start_time = time.time()
         self._stt_response_times = []
         self._current_speech_start_time = None
@@ -131,7 +130,8 @@ class GladiaSTTService(STTService):
         logger.info(f"  Model: {self._model}, Language: {self.language}")
         logger.info(f"  Allow Interruptions: {self._allow_stt_interruptions}, Detect Voicemail: {self.detect_voicemail}")
 
-    # --- Core Service Methods ---
+    def language_to_service_language(self, language: Language) -> Optional[str]:
+        return language_to_gladia_language(language)
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
@@ -141,10 +141,6 @@ class GladiaSTTService(STTService):
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
-        await self._disconnect()
-
-    async def cancel(self, frame: CancelFrame):
-        await super().cancel(frame)
         await self._disconnect()
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
@@ -167,8 +163,6 @@ class GladiaSTTService(STTService):
             logger.warning("Gladia WebSocket connection closed, attempting to reconnect.")
             await self._reconnect()
         yield None
-
-    # --- Connection Management ---
 
     async def _connect(self):
         if self._websocket:
@@ -201,12 +195,9 @@ class GladiaSTTService(STTService):
             logger.info("Disconnected from Gladia.")
 
     async def _reconnect(self):
-        logger.info("Attempting to reconnect to Gladia...")
         await self._disconnect()
         await asyncio.sleep(1)
         await self._connect()
-
-    # --- Frame and Transcript Processing ---
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -250,7 +241,7 @@ class GladiaSTTService(STTService):
 
         if await self._detect_and_handle_voicemail(transcript):
             return
-
+        
         timestamp = time_now_iso8601()
         language_enum = self.language
 
@@ -262,13 +253,12 @@ class GladiaSTTService(STTService):
 
     async def _on_final_transcript(self, transcript, timestamp, language):
         if self._bot_speaking and self._allow_stt_interruptions:
-            logger.info(f"User interrupted bot with: '{transcript}'")
             await self.push_frame(StartInterruptionFrame())
 
         full_transcript = self._accum_transcription + transcript
         frame = TranscriptionFrame(full_transcript.strip(), "", timestamp, language)
         await self.push_frame(frame)
-
+        
         self._handle_first_message(full_transcript)
         self._last_time_transcription = time.time()
         self._accum_transcription = ""
@@ -281,28 +271,19 @@ class GladiaSTTService(STTService):
         full_transcript = self._accum_transcription + transcript
         await self.push_frame(InterimTranscriptionFrame(full_transcript.strip(), "", timestamp, language))
 
-    # --- Logic and Helpers ---
-
     def _record_stt_performance(self, transcript, confidence):
         if self._current_speech_start_time is not None:
             elapsed = time.perf_counter() - self._current_speech_start_time
             self._stt_response_times.append(elapsed)
-            logger.info(f"📊 ⚡ Gladia: ⏱️ STT Response Time: {elapsed:.3f}s")
-            logger.info(f"   📝 Final Transcript: '{transcript}'")
-            logger.info(f"   🎯 Confidence: {confidence:.2f}")
-            logger.info(f"   📦 Audio chunks processed: {self._audio_chunk_count}")
+            logger.info(f"📊 ⚡ Gladia: ⏱️ STT Response Time: {elapsed:.3f}s, Transcript: '{transcript}', Confidence: {confidence:.2f}")
             self._current_speech_start_time = None
-            self._audio_chunk_count = 0
 
     async def _should_ignore_transcription(self, transcript, is_final, confidence):
         if confidence < self._confidence_threshold:
-            logger.debug(f"Ignoring transcript due to low confidence: {confidence}")
             return True
         if self._bot_speaking and not self._allow_stt_interruptions:
-            logger.debug("Ignoring transcript: bot speaking and interruptions disabled.")
             return True
         if self._should_ignore_first_repeated_message(transcript):
-            logger.debug("Ignoring repeated first message.")
             return True
         return False
 
@@ -310,17 +291,14 @@ class GladiaSTTService(STTService):
         if not self.detect_voicemail or self._time_since_init() > VOICEMAIL_DETECTION_SECONDS:
             return False
         if voicemail.is_text_voicemail(transcript):
-            logger.info("Voicemail detected.")
             await self.push_frame(VoicemailFrame(transcript))
             return True
         return False
-
+    
     async def _async_handler(self):
-        """Manages timeouts for sending accumulated transcriptions."""
         while True:
             await asyncio.sleep(0.1)
-            # This handler logic would be for accumulating partials into a final,
-            # but Gladia sends finals directly. This can be adapted if their API changes.
+            # Placeholder for future logic, like managing timeouts.
 
     def _handle_first_message(self, text):
         if not self._first_message:
@@ -336,18 +314,14 @@ class GladiaSTTService(STTService):
         if not self._user_speaking:
             self._user_speaking = True
             await self.push_frame(UserStartedSpeakingFrame())
-            logger.info("👤 User started speaking.")
 
     async def _handle_user_silence(self):
         if self._user_speaking:
             self._user_speaking = False
             await self.push_frame(UserStoppedSpeakingFrame())
-            logger.info("👤 User stopped speaking.")
 
     async def _handle_bot_speaking(self):
         self._bot_speaking = True
-        logger.debug("🤖 Bot started speaking.")
 
     async def _handle_bot_silence(self):
         self._bot_speaking = False
-        logger.debug("🤖 Bot stopped speaking.")
