@@ -81,6 +81,7 @@ class AssemblyAISTTService(STTService):
         on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS,
         detect_voicemail: bool = True,  # Enable voicemail detection
         fast_response: bool = False,  # Enable fast response mode for minimal latency
+        false_interim_seconds: float = FALSE_INTERIM_SECONDS,  # Time threshold for false interim detection
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -95,6 +96,7 @@ class AssemblyAISTTService(STTService):
         self.detect_voicemail = detect_voicemail
         self._fast_response = fast_response
         self._on_no_punctuation_seconds = on_no_punctuation_seconds
+        self._false_interim_seconds = false_interim_seconds  # Configurable threshold for user idle detection
         
         # Bot speaking state (for interruption handling)
         self._bot_speaking = True  # Start as True like Deepgram
@@ -148,6 +150,7 @@ class AssemblyAISTTService(STTService):
         logger.info(f"  Language: {language}, Sample rate: {self._settings['sample_rate']}")
         logger.info(f"  Speech threshold: {speech_threshold}, Allow interruptions: {allow_interruptions}")
         logger.info(f"  Fast response: {fast_response}, Detect voicemail: {detect_voicemail}")
+        logger.info(f"  User idle threshold: {false_interim_seconds}s, No punctuation timeout: {on_no_punctuation_seconds}s")
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -387,9 +390,29 @@ class AssemblyAISTTService(STTService):
                 # Stop TTFB metrics on first transcript
                 await self.stop_ttfb_metrics()
                 
-                # Log transcript receipt
+                # Enhanced logging with full context for debugging
                 transcript_type = "FINAL" if is_formatted else "INTERIM"
-                logger.info(f"AssemblyAI: {transcript_type} transcript received - Text: '{transcript}'")
+                word_count = len(transcript.split())
+                current_time = time.time()
+                
+                logger.info(f"📝 AssemblyAI {transcript_type}: '{transcript}'")
+                logger.debug(f"   ├─ Words: {word_count} | Bot speaking: {self._bot_speaking} | User speaking: {self._user_speaking}")
+                logger.debug(f"   ├─ VAD active: {self._vad_active} | Allow interruptions: {self._allow_stt_interruptions}")
+                
+                # Log timing information for debugging
+                if self._last_interim_time:
+                    time_since_interim = current_time - self._last_interim_time
+                    logger.debug(f"   ├─ Time since last interim: {time_since_interim:.3f}s")
+                
+                if self._last_time_transcription:
+                    time_since_last_transcript = current_time - self._last_time_transcription
+                    logger.debug(f"   ├─ Time since last transcript: {time_since_last_transcript:.3f}s")
+                
+                if self._bot_started_speaking_time:
+                    time_since_bot_started = current_time - self._bot_started_speaking_time
+                    logger.debug(f"   └─ Time since bot started speaking: {time_since_bot_started:.3f}s")
+                else:
+                    logger.debug(f"   └─ Bot has not started speaking yet")
                 
                 # Check voicemail detection (only for final transcripts)
                 if is_formatted and await self._detect_and_handle_voicemail(transcript):
@@ -398,7 +421,10 @@ class AssemblyAISTTService(STTService):
                 
                 # Check if we should ignore this transcription (bot speaking, repeated messages, etc.)
                 if await self._should_ignore_transcription(transcript, is_formatted):
+                    logger.debug(f"   ⚠️  Transcript was filtered out (see reason above)")
                     return
+                
+                logger.debug(f"   ✅ Transcript accepted and will be processed")
                 
                 timestamp = time_now_iso8601()
                 language = self._get_language_enum()
@@ -452,9 +478,12 @@ class AssemblyAISTTService(STTService):
                     
                 else:
                     # This is an interim transcript - push immediately for low latency
-                    logger.debug(f"{self}: INTERIM transcript: '{transcript}'")
+                    logger.debug(f"{self}: Pushing INTERIM transcript frame")
                     
+                    # Update timing trackers
                     self._last_interim_time = time.time()
+                    
+                    # Mark user as speaking
                     await self._handle_user_speaking()
                     
                     # Create and push interim frame immediately (like Deepgram)
@@ -467,6 +496,7 @@ class AssemblyAISTTService(STTService):
                     
                     # Always push interim frames for real-time feedback
                     await self.push_frame(frame)
+                    logger.debug(f"   ✅ Interim frame pushed to pipeline")
             
             elif message_type == 'Error':
                 error_message = data.get('error', 'Unknown error')
@@ -486,7 +516,8 @@ class AssemblyAISTTService(STTService):
             self._user_speaking = True
             self._current_speech_start_time = time.perf_counter()
             await self.push_frame(UserStartedSpeakingFrame(), FrameDirection.UPSTREAM)
-            logger.debug(f"{self}: User started speaking")
+            logger.info(f"👤 {self}: User started speaking")
+            logger.debug(f"   └─ VAD active: {self._vad_active}, Bot speaking: {self._bot_speaking}")
 
     async def _handle_user_silence(self):
         """Handle user stopped speaking event."""
@@ -494,7 +525,8 @@ class AssemblyAISTTService(STTService):
             self._user_speaking = False
             self._current_speech_start_time = None
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
-            logger.debug(f"{self}: User stopped speaking")
+            logger.info(f"👤 {self}: User stopped speaking")
+            logger.debug(f"   └─ VAD active: {self._vad_active}, Bot speaking: {self._bot_speaking}")
 
     async def _send_accum_transcriptions(self):
         """Send accumulated transcriptions and reset buffer.
@@ -555,10 +587,12 @@ class AssemblyAISTTService(STTService):
         
         # Handle VAD state for false interim detection (like Deepgram)
         elif isinstance(frame, VADActiveFrame):
-            logger.debug("🎤 AssemblyAISTTService: VAD active")
+            logger.info("🎤 AssemblyAISTTService: VAD active (user making noise)")
+            logger.debug(f"   └─ User speaking: {self._user_speaking}, Bot speaking: {self._bot_speaking}")
             self._vad_active = True
         elif isinstance(frame, VADInactiveFrame):
-            logger.debug("🎤 AssemblyAISTTService: VAD inactive")
+            logger.info("🎤 AssemblyAISTTService: VAD inactive (user silent)")
+            logger.debug(f"   └─ User speaking: {self._user_speaking}, Bot speaking: {self._bot_speaking}")
             self._vad_active = False
 
     async def _handle_bot_speaking(self):
@@ -578,6 +612,15 @@ class AssemblyAISTTService(STTService):
         """Determine if a transcription should be ignored.
         
         Following Deepgram's pattern for filtering transcriptions during bot speech.
+        Enhanced with VAD state, word count, and timing checks to reduce false positives
+        from external talking, background noise, and echoes.
+        
+        Args:
+            transcript: The transcription text to evaluate
+            is_formatted: Whether this is a final/formatted transcript
+        
+        Returns:
+            True if the transcription should be ignored, False otherwise
         """
         # Check if fast greeting should be ignored
         time_start = self._time_since_init()
@@ -587,6 +630,13 @@ class AssemblyAISTTService(STTService):
         # Check for repeated first message
         if self._should_ignore_first_repeated_message(transcript):
             logger.debug(f"{self}: Ignoring repeated first message")
+            return True
+        
+        # If VAD is inactive for interim transcripts, ignore (user not actually speaking)
+        # This is critical for filtering out external talking picked up by the microphone
+        # Only the intended user should trigger VAD, so VAD inactive = not the user speaking
+        if not self._vad_active and not is_formatted:
+            logger.debug(f"{self}: Ignoring interim transcript because VAD inactive (likely external speech or noise): '{transcript}'")
             return True
         
         # If bot is speaking and interruptions are not allowed
@@ -599,21 +649,36 @@ class AssemblyAISTTService(STTService):
                 # Allow interim transcripts through for UI feedback even when bot is speaking
                 return False
         
-        # Ignore short interruptions when bot is speaking (even if interruptions allowed)
-        # Require at least 2 words to interrupt bot (like Deepgram)
+        # Enhanced interruption filtering when bot is speaking
+        # This prevents false positives from external talking, echoes, or background noise
         if self._bot_speaking:
             word_count = self._transcript_words_count(transcript)
             
-            # Single word = always ignore when bot speaking
+            # Single word = always ignore when bot speaking (high chance of false positive)
             if word_count == 1:
-                logger.debug(f"{self}: Ignoring interruption because bot is speaking (single word): {transcript}")
+                logger.debug(f"{self}: Ignoring interruption because bot is speaking (single word, likely false positive): '{transcript}'")
+                return True
+            
+            # For 2-word phrases when bot is speaking, be more conservative
+            # Require it to be a final transcript to reduce false positives
+            if word_count == 2 and not is_formatted:
+                logger.debug(f"{self}: Ignoring interruption - bot speaking, short interim phrase (likely false positive): '{transcript}'")
                 return True
             
             # Check if interruption is too soon after bot started speaking
+            # This catches echo or immediate false detections (e.g., bot's own speech being picked up)
             if self._bot_started_speaking_time:
                 time_since_bot_started = time.time() - self._bot_started_speaking_time
                 if time_since_bot_started < 1.5:  # Less than 1.5 seconds
-                    logger.debug(f"{self}: Ignoring interruption - too soon after bot started speaking ({time_since_bot_started:.2f}s): '{transcript}'")
+                    logger.debug(f"{self}: Ignoring interruption - too soon after bot started speaking ({time_since_bot_started:.2f}s, likely echo): '{transcript}'")
+                    return True
+            
+            # Check if this transcript is very recent to last transcription
+            # Helps filter duplicate/echo transcriptions or rapid successive false positives
+            if self._last_time_transcription:
+                time_since_last = time.time() - self._last_time_transcription
+                if time_since_last < 2.0:
+                    logger.debug(f"{self}: Ignoring interruption - too soon after last transcript ({time_since_last:.2f}s, possible echo/duplicate): '{transcript}'")
                     return True
         
         # If interruptions are allowed, let everything through
@@ -750,24 +815,44 @@ class AssemblyAISTTService(STTService):
             return
 
     async def _handle_false_interim(self, current_time):
-        """Detect and handle false interim transcripts."""
+        """Detect and handle false interim transcripts with enhanced logging.
+        
+        This detects when a user has stopped speaking by checking if no interim transcripts
+        have been received within the threshold time. This is part of "user idle" detection.
+        
+        Key filtering to reduce false positives:
+        - Only triggers if user was marked as speaking
+        - Requires VAD to be inactive (user not making noise)
+        - Uses configurable time threshold
+        """
+        # Early exits with detailed logging
         if not self._user_speaking:
+            logger.trace("False interim check: User not speaking, skipping")
             return
+            
         if not self._last_interim_time:
+            logger.trace("False interim check: No interim time recorded, skipping")
             return
         
         # CRITICAL: Don't detect false interims when VAD is active (user still making noise)
         # This prevents premature "user stopped speaking" signals while user is mid-sentence
-        # This matches Deepgram's behavior exactly
+        # This also helps filter out external talking - if VAD is active, someone is making noise
+        # but if it's not the intended user, the transcripts should already be filtered by VAD check
         if self._vad_active:
+            logger.trace("False interim check: VAD active, skipping (user still making noise)")
             return
 
         last_interim_delay = current_time - self._last_interim_time
 
-        if last_interim_delay > FALSE_INTERIM_SECONDS:
+        if last_interim_delay < self._false_interim_seconds:
+            logger.trace(f"False interim check: Delay {last_interim_delay:.3f}s < threshold {self._false_interim_seconds}s, skipping")
             return
 
-        logger.debug("False interim detected")
+        # User has been idle long enough - mark as stopped speaking
+        logger.info(f"⏰ User idle detected: {last_interim_delay:.3f}s since last interim (threshold: {self._false_interim_seconds}s)")
+        logger.debug(f"   ├─ VAD active: {self._vad_active}")
+        logger.debug(f"   ├─ Bot speaking: {self._bot_speaking}")
+        logger.debug(f"   └─ Sending UserStoppedSpeakingFrame")
         await self._handle_user_silence()
 
     async def _async_handler(self, task_name):
