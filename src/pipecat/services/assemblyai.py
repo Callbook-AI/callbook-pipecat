@@ -875,13 +875,7 @@ class AssemblyAISTTService(STTService):
         
         This detects when a user has stopped speaking by checking if no interim transcripts
         have been received within the threshold time. This is part of "user idle" detection.
-        
-        Key filtering to reduce false positives:
-        - Only triggers if user was marked as speaking
-        - Requires VAD to be inactive (user not making noise)
-        - Uses configurable time threshold
         """
-        # Early exits with detailed logging
         if not self._user_speaking:
             logger.trace("False interim check: User not speaking, skipping")
             return
@@ -890,10 +884,6 @@ class AssemblyAISTTService(STTService):
             logger.trace("False interim check: No interim time recorded, skipping")
             return
         
-        # CRITICAL: Don't detect false interims when VAD is active (user still making noise)
-        # This prevents premature "user stopped speaking" signals while user is mid-sentence
-        # This also helps filter out external talking - if VAD is active, someone is making noise
-        # but if it's not the intended user, the transcripts should already be filtered by VAD check
         if self._vad_active:
             logger.trace("False interim check: VAD active, skipping (user still making noise)")
             return
@@ -904,7 +894,14 @@ class AssemblyAISTTService(STTService):
             logger.trace(f"False interim check: Delay {last_interim_delay:.3f}s < threshold {self._false_interim_seconds}s, skipping")
             return
 
-        # User has been idle long enough - mark as stopped speaking
+        # NEW: Send accumulated transcripts IMMEDIATELY when user idle detected
+        # Don't wait for the final - use what we have from interims
+        if len(self._accum_transcription_frames) > 0:
+            logger.info(f"⚡ Fast response: Sending interim transcript on user idle ({len(self._accum_transcription_frames)} frames)")
+            await self._send_accum_transcriptions()
+            return  # _send_accum_transcriptions already calls _handle_user_silence
+        
+        # If no accumulated frames, still mark user as stopped
         logger.info(f"⏰ User idle detected: {last_interim_delay:.3f}s since last interim (threshold: {self._false_interim_seconds}s)")
         logger.debug(f"   ├─ VAD active: {self._vad_active}")
         logger.debug(f"   ├─ Bot speaking: {self._bot_speaking}")
