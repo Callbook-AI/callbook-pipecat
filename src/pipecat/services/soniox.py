@@ -198,7 +198,13 @@ class SonioxSTTService(STTService):
         
         try:
             logger.debug(f"📤 Sending audio chunk #{self._audio_chunk_count} ({len(audio)} bytes)")
-            await self._websocket.send(audio)
+            # Soniox requires audio to be sent as base64-encoded JSON message
+            import base64
+            audio_b64 = base64.b64encode(audio).decode('utf-8')
+            audio_message = {
+                "audio": audio_b64
+            }
+            await self._websocket.send(json.dumps(audio_message))
             logger.debug(f"✓ Audio chunk sent successfully")
         except websockets.exceptions.ConnectionClosed as e:
             logger.error("=" * 70)
