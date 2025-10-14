@@ -172,38 +172,76 @@ class SonioxSTTService(STTService):
         :yield: None (transcription frames are pushed via callbacks)
         """
         if not self._websocket or not self._connection_active:
+            logger.debug("⚠️  WebSocket not connected, skipping audio chunk")
+            logger.debug(f"   WebSocket exists: {self._websocket is not None}")
+            logger.debug(f"   Connection active: {self._connection_active}")
             yield None
             return
 
         if self._current_speech_start_time is None:
             self._current_speech_start_time = time.perf_counter()
             self._audio_chunk_count = 0
-            logger.debug("🎤 Soniox: Starting speech detection timer.")
+            logger.info("=" * 70)
+            logger.info("🎤 SPEECH DETECTION STARTED")
+            logger.info("=" * 70)
 
         self._audio_chunk_count += 1
         self._last_audio_chunk_time = time.time()
         
+        # Log every 50 chunks to avoid spam
+        if self._audio_chunk_count % 50 == 0:
+            elapsed = time.perf_counter() - self._current_speech_start_time
+            logger.debug(f"🎤 Audio streaming: {self._audio_chunk_count} chunks sent ({elapsed:.2f}s elapsed)")
+        
         try:
+            logger.debug(f"📤 Sending audio chunk #{self._audio_chunk_count} ({len(audio)} bytes)")
             await self._websocket.send(audio)
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Soniox WebSocket connection closed, attempting to reconnect.")
+            logger.debug(f"✓ Audio chunk sent successfully")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.error("=" * 70)
+            logger.error("❌ WEBSOCKET CONNECTION CLOSED WHILE SENDING AUDIO")
+            logger.error("=" * 70)
+            logger.error(f"Close Code: {e.code if hasattr(e, 'code') else 'N/A'}")
+            logger.error(f"Close Reason: {e.reason if hasattr(e, 'reason') else 'N/A'}")
+            logger.error(f"Chunks sent before disconnect: {self._audio_chunk_count}")
+            logger.error("=" * 70)
+            logger.warning("Attempting to reconnect...")
             await self._reconnect()
+        except Exception as e:
+            logger.error("=" * 70)
+            logger.error("❌ ERROR SENDING AUDIO TO SONIOX")
+            logger.error("=" * 70)
+            logger.error(f"Error Type: {type(e).__name__}")
+            logger.error(f"Error Message: {e}")
+            logger.error(f"Audio chunk size: {len(audio)} bytes")
+            logger.error(f"Chunks sent: {self._audio_chunk_count}")
+            logger.exception("Full traceback:")
+            logger.error("=" * 70)
         yield None
 
     async def _connect(self):
         """Establish websocket connection to Soniox service."""
         if self._websocket and self._connection_active:
+            logger.debug("🔗 Already connected to Soniox, skipping reconnection")
             return
 
         try:
-            logger.info("Connecting to Soniox...")
+            logger.info("=" * 70)
+            logger.info("🔗 SONIOX CONNECTION ATTEMPT")
+            logger.info("=" * 70)
             
             # Validate API key before attempting connection
             if not self._api_key or self._api_key.strip() == "":
                 raise ValueError("Soniox API key is empty or invalid")
             
-            logger.debug(f"Using Soniox API key: {self._api_key[:10]}...")
+            logger.info(f"✓ API Key validated: {self._api_key[:10]}...{self._api_key[-4:]}")
+            logger.info(f"✓ Model: {self._params.model}")
+            logger.info(f"✓ Language: {self._language} -> {language_to_soniox_language(self._language)}")
+            logger.info(f"✓ Sample Rate: {self.sample_rate} Hz")
+            logger.info(f"✓ Speaker Diarization: {self._params.enable_speaker_diarization}")
+            logger.info(f"✓ Language ID: {self._params.enable_language_identification}")
 
+            # Build WebSocket URI
             uri = (
                 f"wss://api.soniox.com/v1/speech-to-text-rt"
                 f"?model={self._params.model}"
@@ -212,61 +250,160 @@ class SonioxSTTService(STTService):
                 f"&enable_speaker_diarization={str(self._params.enable_speaker_diarization).lower()}"
                 f"&enable_language_identification={str(self._params.enable_language_identification).lower()}"
             )
+            
+            logger.info(f"📡 WebSocket URI: {uri}")
+            logger.info(f"🔑 Auth Header: Bearer {self._api_key[:10]}...{self._api_key[-4:]}")
+            logger.info("⏳ Attempting WebSocket connection...")
 
             self._websocket = await websockets.connect(
                 uri, 
                 extra_headers={"Authorization": f"Bearer {self._api_key}"}
             )
             self._connection_active = True
-            logger.info("Connected to Soniox.")
+            
+            logger.info("=" * 70)
+            logger.info("✅ SUCCESSFULLY CONNECTED TO SONIOX")
+            logger.info("=" * 70)
 
             if not self._receive_task:
+                logger.debug("🎧 Starting receive task handler...")
                 self._receive_task = self.create_task(self._receive_task_handler())
             
+            logger.debug("📊 Starting TTFB metrics...")
             await self.start_ttfb_metrics()
+            logger.debug("📊 Starting processing metrics...")
             await self.start_processing_metrics()
             
+            logger.info("✅ Soniox service fully initialized and ready")
+            
+        except websockets.exceptions.InvalidStatusCode as e:
+            logger.error("=" * 70)
+            logger.error("❌ SONIOX CONNECTION FAILED - HTTP STATUS ERROR")
+            logger.error("=" * 70)
+            logger.error(f"Status Code: {e.status_code}")
+            logger.error(f"Error Message: {e}")
+            logger.error(f"Headers: {e.headers if hasattr(e, 'headers') else 'N/A'}")
+            logger.error(f"API Key (masked): {self._api_key[:10]}...{self._api_key[-4:]}")
+            logger.error(f"Endpoint: wss://api.soniox.com/v1/speech-to-text-rt")
+            logger.error(f"Model: {self._params.model}")
+            logger.error(f"Language: {language_to_soniox_language(self._language)}")
+            logger.error("Possible Issues:")
+            logger.error("  1. Invalid API key")
+            logger.error("  2. Invalid model name")
+            logger.error("  3. Unsupported language code")
+            logger.error("  4. API endpoint URL incorrect")
+            logger.error("  5. Account not active or insufficient credits")
+            logger.error("=" * 70)
+            await self.push_error(ErrorFrame(f"Soniox connection failed: {e}"))
+            
+        except websockets.exceptions.InvalidURI as e:
+            logger.error("=" * 70)
+            logger.error("❌ SONIOX CONNECTION FAILED - INVALID URI")
+            logger.error("=" * 70)
+            logger.error(f"URI Error: {e}")
+            logger.error(f"Attempted URI: {uri if 'uri' in locals() else 'Not constructed'}")
+            logger.error("=" * 70)
+            await self.push_error(ErrorFrame(f"Soniox invalid URI: {e}"))
+            
         except Exception as e:
-            logger.error(f"Failed to connect to Soniox: {e}")
+            logger.error("=" * 70)
+            logger.error("❌ SONIOX CONNECTION FAILED - UNEXPECTED ERROR")
+            logger.error("=" * 70)
+            logger.error(f"Error Type: {type(e).__name__}")
+            logger.error(f"Error Message: {e}")
+            logger.error(f"API Key (masked): {self._api_key[:10]}...{self._api_key[-4:] if len(self._api_key) > 14 else '****'}")
+            logger.exception("Full traceback:")
+            logger.error("=" * 70)
             await self.push_error(ErrorFrame(f"Soniox connection failed: {e}"))
 
     async def _disconnect(self):
         """Disconnect from Soniox service and clean up resources."""
+        logger.info("=" * 70)
+        logger.info("🔌 DISCONNECTING FROM SONIOX")
+        logger.info("=" * 70)
+        
         self._connection_active = False
         
         # Cancel async handler task
         if self._async_handler_task:
+            logger.debug("⏹️  Cancelling async handler task...")
             await self.cancel_task(self._async_handler_task)
             self._async_handler_task = None
+            logger.debug("✓ Async handler task cancelled")
         
         # Cancel receive task
         if self._receive_task:
+            logger.debug("⏹️  Cancelling receive task...")
             await self.cancel_task(self._receive_task)
             self._receive_task = None
+            logger.debug("✓ Receive task cancelled")
         
         # Close websocket
         if self._websocket:
+            logger.debug("🔌 Closing WebSocket connection...")
             await self._websocket.close()
             self._websocket = None
-            logger.info("Disconnected from Soniox.")
+            logger.info("✅ Disconnected from Soniox")
+        
+        logger.info("=" * 70)
 
     async def _reconnect(self):
+        """Attempt to reconnect to Soniox service."""
+        logger.warning("=" * 70)
+        logger.warning("🔄 ATTEMPTING TO RECONNECT TO SONIOX")
+        logger.warning("=" * 70)
         await self._disconnect()
+        logger.info("⏳ Waiting 1 second before reconnection attempt...")
         await asyncio.sleep(1)
         await self._connect()
 
     async def _receive_task_handler(self):
         """Handle incoming transcription messages from Soniox."""
+        logger.info("🎧 Receive task handler started and listening for messages...")
+        message_count = 0
+        
         while self._connection_active:
             try:
+                logger.debug("⏳ Waiting for message from Soniox WebSocket...")
                 message = await self._websocket.recv()
+                message_count += 1
+                logger.debug(f"📨 Received message #{message_count} from Soniox")
+                logger.debug(f"📨 Raw message length: {len(message)} bytes")
+                logger.debug(f"📨 Raw message preview: {message[:200]}..." if len(message) > 200 else f"📨 Raw message: {message}")
+                
                 await self._on_message(json.loads(message))
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("Soniox connection closed during receive.")
+                
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning("=" * 70)
+                logger.warning("⚠️  SONIOX CONNECTION CLOSED DURING RECEIVE")
+                logger.warning("=" * 70)
+                logger.warning(f"Close Code: {e.code if hasattr(e, 'code') else 'N/A'}")
+                logger.warning(f"Close Reason: {e.reason if hasattr(e, 'reason') else 'N/A'}")
+                logger.warning(f"Messages received before close: {message_count}")
+                logger.warning("=" * 70)
                 break
+                
+            except json.JSONDecodeError as e:
+                logger.error("=" * 70)
+                logger.error("❌ JSON DECODE ERROR")
+                logger.error("=" * 70)
+                logger.error(f"Error: {e}")
+                logger.error(f"Message that failed to parse: {message[:500] if 'message' in locals() else 'N/A'}")
+                logger.error("=" * 70)
+                continue
+                
             except Exception as e:
-                logger.error(f"Error in Soniox receive task: {e}")
+                logger.error("=" * 70)
+                logger.error("❌ ERROR IN SONIOX RECEIVE TASK")
+                logger.error("=" * 70)
+                logger.error(f"Error Type: {type(e).__name__}")
+                logger.error(f"Error Message: {e}")
+                logger.error(f"Messages received before error: {message_count}")
+                logger.exception("Full traceback:")
+                logger.error("=" * 70)
                 break
+        
+        logger.info(f"🎧 Receive task handler stopped. Total messages received: {message_count}")
 
     async def _on_message(self, data: Dict):
         """Process incoming transcription message.
@@ -274,45 +411,87 @@ class SonioxSTTService(STTService):
         Handles transcript messages from Soniox with Deepgram-style processing.
         """
         try:
+            logger.debug("=" * 70)
+            logger.debug("📨 PROCESSING SONIOX MESSAGE")
+            logger.debug("=" * 70)
+            logger.debug(f"Message keys: {list(data.keys())}")
+            logger.debug(f"Full message data: {json.dumps(data, indent=2)}")
+            
             await self.stop_ttfb_metrics()
 
             words = data.get("words", [])
+            logger.debug(f"📝 Words count: {len(words)}")
+            
             if not words:
+                logger.debug("⚠️  No words in message, skipping")
+                logger.debug("=" * 70)
                 return
 
             transcript = " ".join(w["text"] for w in words)
             is_final = data.get("final", False)
+            
+            logger.debug(f"📝 Transcript: '{transcript}'")
+            logger.debug(f"✓ Is Final: {is_final}")
+            logger.debug(f"✓ Length: {len(transcript)} chars, {len(words)} words")
 
             if not transcript.strip():
+                logger.debug("⚠️  Empty transcript after stripping, skipping")
+                logger.debug("=" * 70)
                 return
 
             # Check if we should ignore this transcription
-            if await self._should_ignore_transcription(transcript):
+            should_ignore = await self._should_ignore_transcription(transcript)
+            logger.debug(f"✓ Should ignore: {should_ignore}")
+            
+            if should_ignore:
+                logger.debug("⏭️  Transcript ignored based on filtering rules")
+                logger.debug("=" * 70)
                 return
 
             # Update interim time for false interim detection
             if not is_final:
                 self._last_interim_time = time.time()
+                logger.debug(f"⏰ Updated interim time: {self._last_interim_time}")
 
             timestamp = time_now_iso8601()
             language_enum = self._language
 
             if is_final:
+                logger.info("=" * 70)
+                logger.info("✅ FINAL TRANSCRIPT RECEIVED")
+                logger.info("=" * 70)
+                logger.info(f"📝 '{transcript}'")
+                logger.info(f"🔤 Words: {len(words)}, Chars: {len(transcript)}")
+                logger.info("=" * 70)
+                
                 self._record_stt_performance(transcript, words)
                 await self._on_final_transcript_message(transcript, language_enum)
                 self._last_final_transcript_time = time.time()
                 self._last_time_transcription = time.time()
             else:
+                logger.debug("⏳ INTERIM TRANSCRIPT")
+                logger.debug(f"📝 '{transcript}'")
                 await self._on_interim_transcript_message(transcript, language_enum)
+            
+            logger.debug("=" * 70)
                 
         except Exception as e:
-            logger.error(f"Error processing Soniox message: {e}")
+            logger.error("=" * 70)
+            logger.error("❌ ERROR PROCESSING SONIOX MESSAGE")
+            logger.error("=" * 70)
+            logger.error(f"Error Type: {type(e).__name__}")
+            logger.error(f"Error Message: {e}")
+            logger.error(f"Message data: {data if 'data' in locals() else 'N/A'}")
+            logger.exception("Full traceback:")
+            logger.error("=" * 70)
 
     async def _on_final_transcript_message(self, transcript: str, language: Language):
         """Handle final transcript following Deepgram pattern."""
+        logger.debug("🔵 Processing final transcript...")
         
         # Check for voicemail detection
         if self.detect_voicemail:
+            logger.debug("🔍 Checking for voicemail...")
             await self._detect_and_handle_voicemail(transcript)
         
         # Handle first message tracking
@@ -320,9 +499,10 @@ class SonioxSTTService(STTService):
         
         # Check for repeated first message
         if self._should_ignore_first_repeated_message(transcript):
-            logger.debug(f"Ignoring repeated first message: '{transcript}'")
+            logger.debug(f"⏭️  Ignoring repeated first message: '{transcript}'")
             return
         
+        logger.debug("👤 Triggering user speaking state...")
         await self._handle_user_speaking()
         
         # Create transcription frame
@@ -332,16 +512,24 @@ class SonioxSTTService(STTService):
             time_now_iso8601(),
             language
         )
+        logger.debug(f"📦 Created TranscriptionFrame: '{transcript}'")
         
         # Handle accumulation or immediate sending based on fast response mode
-        if self._is_accum_transcription(transcript):
+        is_accum = self._is_accum_transcription(transcript)
+        logger.debug(f"✓ Should accumulate: {is_accum} (ends with punctuation: {not is_accum})")
+        
+        if is_accum:
+            logger.debug("📥 Appending to accumulation buffer...")
             self._append_accum_transcription(frame)
         else:
+            logger.debug("📥 Appending to buffer and sending immediately...")
             self._append_accum_transcription(frame)
             await self._send_accum_transcriptions()
 
     async def _on_interim_transcript_message(self, transcript: str, language: Language):
         """Handle interim transcript."""
+        logger.debug("🟡 Processing interim transcript...")
+        logger.debug("👤 Triggering user speaking state...")
         await self._handle_user_speaking()
         
         frame = InterimTranscriptionFrame(
@@ -350,7 +538,10 @@ class SonioxSTTService(STTService):
             time_now_iso8601(),
             language
         )
+        logger.debug(f"📦 Created InterimTranscriptionFrame: '{transcript}'")
+        logger.debug(f"⬇️  Pushing InterimTranscriptionFrame DOWNSTREAM")
         await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+        logger.debug("✓ InterimTranscriptionFrame pushed")
 
     def _record_stt_performance(self, transcript, words):
         """Record STT performance metrics."""
@@ -367,18 +558,33 @@ class SonioxSTTService(STTService):
     async def _handle_user_speaking(self):
         """Handle user started speaking event."""
         if not self._user_speaking:
+            logger.info("=" * 70)
+            logger.info("👤 USER STARTED SPEAKING")
+            logger.info("=" * 70)
+            logger.debug("⬆️  Pushing StartInterruptionFrame")
             await self.push_frame(StartInterruptionFrame())
             self._user_speaking = True
+            logger.debug("⬆️  Pushing UserStartedSpeakingFrame")
             await self.push_frame(UserStartedSpeakingFrame())
-            logger.debug(f"👤 {self}: User started speaking")
+            logger.info("✓ User speaking state activated")
+            logger.info("=" * 70)
+        else:
+            logger.debug("👤 User already marked as speaking, skipping")
 
     async def _handle_user_silence(self):
         """Handle user stopped speaking event."""
         if self._user_speaking:
+            logger.info("=" * 70)
+            logger.info("👤 USER STOPPED SPEAKING")
+            logger.info("=" * 70)
             self._user_speaking = False
             self._current_speech_start_time = None
+            logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
-            logger.debug(f"👤 {self}: User stopped speaking")
+            logger.info("✓ User silence state activated")
+            logger.info("=" * 70)
+        else:
+            logger.debug("👤 User already marked as not speaking, skipping")
             
     async def _handle_bot_speaking(self):
         """Handle bot started speaking event."""
@@ -483,20 +689,29 @@ class SonioxSTTService(STTService):
 
     async def _send_accum_transcriptions(self):
         """Send accumulated transcriptions following Deepgram/AssemblyAI pattern."""
+        logger.info("=" * 70)
+        logger.info("📤 SENDING ACCUMULATED TRANSCRIPTIONS")
+        logger.info("=" * 70)
+        
         if not len(self._accum_transcription_frames):
+            logger.debug("⚠️  No accumulated frames to send")
+            logger.info("=" * 70)
             return
 
         # Combine all transcripts into one message
         full_text = " ".join([frame.text for frame in self._accum_transcription_frames])
+        logger.info(f"📝 Combined transcript: '{full_text}'")
+        logger.info(f"📊 Total frames: {len(self._accum_transcription_frames)}")
         
         # Check if this is a DUPLICATE transcript
         if full_text.strip() == self._last_sent_transcript:
-            logger.debug(f"⚠️  Skipping DUPLICATE transcript: '{full_text}'")
+            logger.warning(f"⚠️  DUPLICATE transcript detected, skipping: '{full_text}'")
+            logger.warning(f"   Last sent: '{self._last_sent_transcript}'")
             self._accum_transcription_frames = []
+            logger.info("=" * 70)
             return
         
-        logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
-        logger.debug(f"📝 Sending transcript as TranscriptionFrame: '{full_text}'")
+        logger.info(f"✓ New transcript (not duplicate)")
         
         # Store what we're sending for deduplication
         self._last_sent_transcript = full_text.strip()
@@ -504,17 +719,26 @@ class SonioxSTTService(STTService):
         # Ensure transport processes UserStoppedSpeakingFrame BEFORE TranscriptionFrame
         # This prevents race condition in transport's frame emulation logic
         was_user_speaking = self._user_speaking
+        logger.info(f"👤 User was speaking: {was_user_speaking}")
+        
         if was_user_speaking:
+            logger.info("⏸️  Stopping user speaking state before sending transcript...")
             self._user_speaking = False
             self._current_speech_start_time = None
+            logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
-            logger.debug(f"⚡ Sent UserStoppedSpeakingFrame UPSTREAM")
+            logger.info("✓ UserStoppedSpeakingFrame sent UPSTREAM")
             
             # Give transport time to process UserStoppedSpeakingFrame
+            logger.debug("⏳ Waiting 1ms for transport to process UserStoppedSpeakingFrame...")
             await asyncio.sleep(0.001)  # 1ms for async frame processing
-            logger.debug(f"⚡ Waited for transport to process UserStoppedSpeakingFrame")
+            logger.debug("✓ Wait complete")
         
         # Now send TranscriptionFrame
+        logger.info("⬇️  Pushing TranscriptionFrame DOWNSTREAM")
+        logger.info(f"   Text: '{full_text}'")
+        logger.info(f"   Language: {self._language}")
+        
         await self.push_frame(
             TranscriptionFrame(
                 full_text,
@@ -524,10 +748,13 @@ class SonioxSTTService(STTService):
             ),
             FrameDirection.DOWNSTREAM
         )
-        logger.debug(f"⚡ Sent TranscriptionFrame DOWNSTREAM")
+        logger.info("✅ TranscriptionFrame sent DOWNSTREAM")
         
         self._accum_transcription_frames = []
+        logger.debug("📊 Stopping processing metrics...")
         await self.stop_processing_metrics()
+        
+        logger.info("=" * 70)
 
     async def _async_handle_accum_transcription(self, current_time):
         """Handle accumulated transcriptions with timeout."""
@@ -661,17 +888,23 @@ class SonioxSTTService(STTService):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames for bot speaking state and interruption handling."""
+        # Log all frames for debugging
+        frame_name = type(frame).__name__
+        logger.debug(f"🎯 Processing frame: {frame_name} (direction: {direction.name})")
+        
         await super().process_frame(frame, direction)
         
         # Handle bot speaking state for interruption detection
         if isinstance(frame, BotStartedSpeakingFrame):
+            logger.debug("🤖 Received BotStartedSpeakingFrame")
             await self._handle_bot_speaking()
         elif isinstance(frame, BotStoppedSpeakingFrame):
+            logger.debug("🤖 Received BotStoppedSpeakingFrame")
             await self._handle_bot_silence()
         elif isinstance(frame, VADActiveFrame):
             self._vad_active = True
-            logger.debug(f"🎤 {self}: VAD active")
+            logger.info(f"🎤 {self}: VAD ACTIVE (voice detected)")
         elif isinstance(frame, VADInactiveFrame):
             self._vad_active = False
             self._vad_inactive_time = time.time()
-            logger.debug(f"🎤 {self}: VAD inactive")
+            logger.info(f"🎤 {self}: VAD INACTIVE (silence detected)")
