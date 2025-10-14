@@ -665,11 +665,13 @@ class SonioxSTTService(STTService):
         """
         logger.debug(f"🟡 Interim: '{transcript[:50]}...' ({len(transcript)} chars)")
         
-        # Only trigger user speaking state if not already active
-        # This prevents repeated interim transcripts from re-triggering after we've stopped
-        if not self._user_speaking:
+        # Only trigger user speaking state if not already active AND VAD hasn't gone inactive
+        # This prevents repeated interim transcripts from re-triggering after VAD detected silence
+        if not self._user_speaking and not (self._vad_inactive_time and time.time() - self._vad_inactive_time < 2.0):
             logger.info("👤 First interim - triggering user speaking state...")
             await self._handle_user_speaking()
+        elif self._vad_inactive_time and time.time() - self._vad_inactive_time < 2.0:
+            logger.debug(f"⚠️  Skipping user speaking trigger - VAD went inactive {time.time() - self._vad_inactive_time:.2f}s ago")
         
         frame = InterimTranscriptionFrame(
             transcript,
@@ -939,8 +941,9 @@ class SonioxSTTService(STTService):
             await self._handle_bot_silence()
         elif isinstance(frame, VADActiveFrame):
             self._vad_active = True
+            self._vad_inactive_time = None  # Reset when VAD becomes active
             logger.info(f"🎤 {self}: VAD ACTIVE (voice detected)")
         elif isinstance(frame, VADInactiveFrame):
             self._vad_active = False
             self._vad_inactive_time = time.time()
-            logger.info(f"🎤 {self}: VAD INACTIVE (silence detected)")
+            logger.info(f"🎤 {self}: VAD INACTIVE (silence detected at {self._vad_inactive_time})")
