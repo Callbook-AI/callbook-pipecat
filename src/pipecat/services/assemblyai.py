@@ -369,6 +369,10 @@ class AssemblyAISTTService(STTService):
         try:
             message_type = data.get('type')
             
+            # Log ALL messages for debugging initial silence
+            if message_type not in ['SessionBegins', 'SessionTerminated']:
+                logger.trace(f"{self}: Received AssemblyAI message type: {message_type}")
+            
             if message_type == 'Turn':
                 transcript = data.get('transcript', '')
                 
@@ -576,22 +580,29 @@ class AssemblyAISTTService(STTService):
         # ✅ Store what we're sending for deduplication
         self._last_sent_transcript = full_text.strip()
         
-        # ⚡ CRITICAL: Send UserStoppedSpeakingFrame FIRST, then TranscriptionFrame
-        # Order matters! The transport needs to see:
-        # 1. UserStoppedSpeakingFrame (user is done speaking)
-        # 2. TranscriptionFrame (here's the final transcript)
-        # 3. LLM processes immediately
+        # ⚡ CRITICAL FIX: Ensure transport processes UserStoppedSpeakingFrame BEFORE TranscriptionFrame
         # 
-        # If we send TranscriptionFrame first while _user_speaking=True,
-        # the transport gets confused and waits for timeout.
+        # The transport has its own frame emulation logic that races with our frames.
+        # Even if we send UserStoppedSpeakingFrame first, async processing means the transport
+        # might see TranscriptionFrame before it processes UserStoppedSpeakingFrame, causing it
+        # to think user just started speaking again (emulation), which triggers interruption handling.
+        # 
+        # Solution: Send UserStoppedSpeakingFrame and give transport a tiny window to process it
+        # BEFORE we send TranscriptionFrame. This prevents the race condition.
         was_user_speaking = self._user_speaking
         if was_user_speaking:
             self._user_speaking = False
             self._current_speech_start_time = None
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
-            logger.debug(f"⚡ Sent UserStoppedSpeakingFrame BEFORE transcript to avoid transport timeout")
+            logger.debug(f"⚡ Sent UserStoppedSpeakingFrame UPSTREAM")
+            
+            # Give transport time to process UserStoppedSpeakingFrame before TranscriptionFrame arrives
+            # This prevents race condition where transport emulates "user started speaking" 
+            # when it sees TranscriptionFrame before processing UserStoppedSpeakingFrame
+            await asyncio.sleep(0.001)  # 1ms is enough for async frame processing
+            logger.debug(f"⚡ Waited for transport to process UserStoppedSpeakingFrame")
         
-        # Now send TranscriptionFrame - transport knows user is done, processes immediately
+        # Now send TranscriptionFrame - transport has already processed UserStoppedSpeakingFrame
         await self.push_frame(
             TranscriptionFrame(
                 full_text,
@@ -601,6 +612,7 @@ class AssemblyAISTTService(STTService):
             ),
             FrameDirection.DOWNSTREAM
         )
+        logger.debug(f"⚡ Sent TranscriptionFrame DOWNSTREAM after ensuring transport ready")
         
         self._accum_transcription_frames = []
         
