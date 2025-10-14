@@ -211,10 +211,10 @@ class SonioxSTTService(STTService):
             logger.debug(f"🎤 Audio streaming: {self._audio_chunk_count} chunks sent ({elapsed:.2f}s elapsed)")
         
         try:
-            logger.debug(f"📤 Sending audio chunk #{self._audio_chunk_count} ({len(audio)} bytes)")
+            # logger.debug(f"📤 Sending audio chunk #{self._audio_chunk_count} ({len(audio)} bytes)")
             # Soniox accepts raw binary PCM audio after configuration
             await self._websocket.send(audio)
-            logger.debug(f"✓ Audio chunk sent successfully")
+            # logger.debug(f"✓ Audio chunk sent successfully")
         except websockets.exceptions.ConnectionClosed as e:
             logger.error("=" * 70)
             logger.error("❌ WEBSOCKET CONNECTION CLOSED WHILE SENDING AUDIO")
@@ -960,8 +960,8 @@ class SonioxSTTService(STTService):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames for bot speaking state and interruption handling."""
         # Log all frames for debugging
-        frame_name = type(frame).__name__
-        logger.debug(f"🎯 Processing frame: {frame_name} (direction: {direction.name})")
+        # frame_name = type(frame).__name__
+        # logger.debug(f"🎯 Processing frame: {frame_name} (direction: {direction.name})")
         
         await super().process_frame(frame, direction)
         
