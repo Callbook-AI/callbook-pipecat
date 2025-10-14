@@ -136,6 +136,10 @@ class SonioxSTTService(STTService):
         # Transcript tracking
         self._last_interim_time = None
         self._last_sent_transcript = None
+        
+        # Token accumulation (like the working example)
+        self._final_tokens = []  # Accumulate final tokens until endpoint
+        self._last_token_time = None
 
         # First message tracking
         self._first_message = None
@@ -287,6 +291,8 @@ class SonioxSTTService(STTService):
                 "language_hints": [language_hint],
                 "enable_speaker_diarization": self._params.enable_speaker_diarization,
                 "enable_language_identification": self._params.enable_language_identification,
+                # CRITICAL: Enable endpoint detection like the working example
+                "enable_endpoint_detection": True,
             }
             
             # Add context if provided
@@ -460,8 +466,10 @@ class SonioxSTTService(STTService):
     async def _on_message(self, data: Dict):
         """Process incoming transcription message.
         
-        Handles transcript messages from Soniox with Deepgram-style processing.
-        Soniox returns 'tokens' array with 'is_final' flag per token.
+        Following the working example pattern:
+        - Accumulate final tokens until endpoint is detected
+        - Send non-final tokens as interim immediately  
+        - Only send TranscriptionFrame when we detect endpoint (gap in tokens or explicit signal)
         """
         try:
             logger.debug("=" * 70)
@@ -479,67 +487,72 @@ class SonioxSTTService(STTService):
             # Check for finished response
             if data.get("finished"):
                 logger.info("✅ Soniox session finished")
+                # Send any remaining final tokens before finishing
+                await self._send_accumulated_transcription()
                 return
             
             await self.stop_ttfb_metrics()
 
-            # Soniox uses 'tokens' not 'words'
+            # Parse tokens from current response (like working example)
             tokens = data.get("tokens", [])
             logger.debug(f"📝 Tokens count: {len(tokens)}")
             
             if not tokens:
+                # No tokens in this message - might indicate endpoint
+                # Check if we have accumulated finals that haven't been sent
+                if self._final_tokens:
+                    elapsed_since_last_token = time.time() - (self._last_token_time or 0)
+                    if elapsed_since_last_token > 0.5:  # 500ms gap indicates endpoint
+                        logger.info("🔚 Detected endpoint (token gap) - sending accumulated transcription")
+                        await self._send_accumulated_transcription()
                 logger.debug("⚠️  No tokens in message, skipping")
                 logger.debug("=" * 70)
                 return
 
-            # Build transcript from tokens
-            transcript = " ".join(t["text"] for t in tokens)
+            non_final_tokens = []
+            has_final = False
             
-            # Check if all tokens are final (Soniox marks each token with is_final)
-            is_final = all(t.get("is_final", False) for t in tokens)
+            # Separate final vs non-final tokens (like working example)
+            for token in tokens:
+                text = token.get("text", "")
+                if not text:
+                    continue
+                    
+                if token.get("is_final"):
+                    # Final token - add to accumulation buffer
+                    self._final_tokens.append(token)
+                    has_final = True
+                    self._last_token_time = time.time()
+                else:
+                    # Non-final token - will be sent as interim
+                    non_final_tokens.append(token)
             
-            logger.debug(f"📝 Transcript: '{transcript}'")
-            logger.debug(f"✓ Is Final: {is_final}")
-            logger.debug(f"✓ Length: {len(transcript)} chars, {len(tokens)} tokens")
-
-            if not transcript.strip():
-                logger.debug("⚠️  Empty transcript after stripping, skipping")
-                logger.debug("=" * 70)
-                return
-
-            # Check if we should ignore this transcription
-            should_ignore = await self._should_ignore_transcription(transcript)
-            logger.debug(f"✓ Should ignore: {should_ignore}")
+            # Build texts for interim display
+            final_text = "".join(t["text"] for t in self._final_tokens)
+            non_final_text = "".join(t["text"] for t in non_final_tokens)
+            combined_text = final_text + non_final_text
             
-            if should_ignore:
-                logger.debug("⏭️  Transcript ignored based on filtering rules")
-                logger.debug("=" * 70)
-                return
-
-            # Update interim time for false interim detection
-            if not is_final:
-                self._last_interim_time = time.time()
-                logger.debug(f"⏰ Updated interim time: {self._last_interim_time}")
-
-            timestamp = time_now_iso8601()
-            language_enum = self._language
-
-            if is_final:
-                logger.info("=" * 70)
-                logger.info("✅ FINAL TRANSCRIPT RECEIVED")
-                logger.info("=" * 70)
-                logger.info(f"📝 '{transcript}'")
-                logger.info(f"🔤 Tokens: {len(tokens)}, Chars: {len(transcript)}")
-                logger.info("=" * 70)
-                
-                self._record_stt_performance(transcript, tokens)
-                await self._on_final_transcript_message(transcript, language_enum)
-                self._last_final_transcript_time = time.time()
-                self._last_time_transcription = time.time()
-            else:
-                logger.debug("⏳ INTERIM TRANSCRIPT")
-                logger.debug(f"📝 '{transcript}'")
-                await self._on_interim_transcript_message(transcript, language_enum)
+            logger.debug(f"📝 Final tokens accumulated: {len(self._final_tokens)}")
+            logger.debug(f"📝 Non-final tokens: {len(non_final_tokens)}")
+            logger.debug(f"📝 Combined text: '{combined_text}'")
+            
+            # Always send interim transcription to show progress
+            if combined_text.strip():
+                # Check if we should ignore this transcription
+                should_ignore = await self._should_ignore_transcription(combined_text)
+                if not should_ignore:
+                    # Update interim time for false interim detection
+                    self._last_interim_time = time.time()
+                    
+                    # Send as interim (even finals are interim until endpoint detected)
+                    await self._on_interim_transcript_message(combined_text, self._language)
+            
+            # Check if we should send the final transcription now
+            # This happens when: no more non-finals AND we have finals
+            if has_final and len(non_final_tokens) == 0 and len(self._final_tokens) > 0:
+                # All tokens are final and no more non-finals coming - this is likely an endpoint
+                logger.info("🔚 Detected endpoint (all final, no non-finals) - sending accumulated transcription")
+                await self._send_accumulated_transcription()
             
             logger.debug("=" * 70)
                 
@@ -552,6 +565,42 @@ class SonioxSTTService(STTService):
             logger.error(f"Message data: {data if 'data' in locals() else 'N/A'}")
             logger.exception("Full traceback:")
             logger.error("=" * 70)
+
+    async def _send_accumulated_transcription(self):
+        """Send accumulated final tokens as a complete TranscriptionFrame.
+        
+        This is called when we detect an endpoint (no more tokens coming).
+        """
+        if not self._final_tokens:
+            logger.debug("No accumulated tokens to send")
+            return
+        
+        # Build final transcript from accumulated tokens
+        transcript = "".join(t["text"] for t in self._final_tokens)
+        
+        if not transcript.strip():
+            logger.debug("Empty accumulated transcript, skipping")
+            self._final_tokens = []
+            return
+        
+        logger.info("=" * 70)
+        logger.info("✅ SENDING ACCUMULATED FINAL TRANSCRIPT")
+        logger.info("=" * 70)
+        logger.info(f"📝 '{transcript}'")
+        logger.info(f"🔤 Tokens: {len(self._final_tokens)}, Chars: {len(transcript)}")
+        logger.info("=" * 70)
+        
+        # Record performance
+        self._record_stt_performance(transcript, self._final_tokens)
+        
+        # Send the final transcription
+        await self._on_final_transcript_message(transcript, self._language)
+        
+        # Clear accumulated tokens for next utterance
+        self._final_tokens = []
+        self._last_token_time = None
+        self._last_final_transcript_time = time.time()
+        self._last_time_transcription = time.time()
 
     async def _on_final_transcript_message(self, transcript: str, language: Language):
         """Handle final transcript - user has FINISHED speaking."""
@@ -611,18 +660,16 @@ class SonioxSTTService(STTService):
     async def _on_interim_transcript_message(self, transcript: str, language: Language):
         """Handle interim transcript.
         
-        Interim transcripts are sent immediately and trigger user_speaking state ONLY once.
-        This allows the aggregator to see real-time progress without triggering processing.
+        Shows real-time progress. Triggers user_speaking state ONLY on first call.
+        Both non-final tokens AND accumulated finals (before endpoint) are sent as interim.
         """
-        logger.debug("🟡 Processing interim transcript...")
+        logger.debug(f"🟡 Interim: '{transcript[:50]}...' ({len(transcript)} chars)")
         
         # Only trigger user speaking state if not already active
         # This prevents repeated interim transcripts from re-triggering after we've stopped
         if not self._user_speaking:
-            logger.debug("👤 Triggering user speaking state for first time...")
+            logger.info("👤 First interim - triggering user speaking state...")
             await self._handle_user_speaking()
-        else:
-            logger.debug("👤 User already speaking, not re-triggering")
         
         frame = InterimTranscriptionFrame(
             transcript,
@@ -630,10 +677,7 @@ class SonioxSTTService(STTService):
             time_now_iso8601(),
             language
         )
-        logger.debug(f"📦 Created InterimTranscriptionFrame: '{transcript}'")
-        logger.debug(f"⬇️  Pushing InterimTranscriptionFrame DOWNSTREAM")
         await self.push_frame(frame, FrameDirection.DOWNSTREAM)
-        logger.debug("✓ InterimTranscriptionFrame pushed")
 
     def _record_stt_performance(self, transcript, tokens):
         """Record STT performance metrics."""
@@ -805,6 +849,14 @@ class SonioxSTTService(STTService):
             await asyncio.sleep(0.1)
             
             current_time = time.time()
+
+            # Check if we should send accumulated transcription due to timeout
+            if self._final_tokens and self._last_token_time:
+                elapsed = current_time - self._last_token_time
+                # If no new tokens for 800ms, consider it an endpoint
+                if elapsed > 0.8:
+                    logger.debug(f"🔚 Endpoint detected by timeout ({elapsed:.2f}s since last token)")
+                    await self._send_accumulated_transcription()
 
             await self._async_handle_accum_transcription(current_time)
             await self._handle_false_interim(current_time)
