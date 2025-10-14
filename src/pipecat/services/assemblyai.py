@@ -576,17 +576,14 @@ class AssemblyAISTTService(STTService):
         # ✅ Store what we're sending for deduplication
         self._last_sent_transcript = full_text.strip()
         
-        # ⚡ CRITICAL: Send UserStoppedSpeakingFrame BEFORE TranscriptionFrame
-        # This signals to the pipeline that the user is done speaking and the 
-        # transcript should be processed immediately without waiting for timeout.
-        # This is what eliminates the 2-3s latency!
-        if self._user_speaking:
-            self._user_speaking = False
-            self._current_speech_start_time = None
-            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
-            logger.debug(f"⚡ Sent UserStoppedSpeakingFrame BEFORE transcript for immediate processing")
+        # ⚡ CRITICAL: Mark user as NOT speaking BEFORE pushing frames
+        # This prevents the transport from getting confused and triggering
+        # "user started speaking" -> interruption -> task cancellation
+        was_user_speaking = self._user_speaking
+        self._user_speaking = False
+        self._current_speech_start_time = None
         
-        # Push as TranscriptionFrame - will go through transcript processor
+        # Push TranscriptionFrame first - will go through transcript processor
         await self.push_frame(
             TranscriptionFrame(
                 full_text,
@@ -594,8 +591,17 @@ class AssemblyAISTTService(STTService):
                 time_now_iso8601(),
                 self._get_language_enum()
             ),
-            FrameDirection.DOWNSTREAM  # Important: DOWNSTREAM not UPSTREAM
+            FrameDirection.DOWNSTREAM
         )
+        
+        # Now send UserStoppedSpeakingFrame to signal completion
+        # This is sent AFTER the transcript so the transport sees:
+        # 1. Transcript arrives (user_speaking=False, so no interruption)
+        # 2. UserStoppedSpeakingFrame confirms user is done
+        # 3. LLM can process immediately
+        if was_user_speaking:
+            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+            logger.debug(f"⚡ Sent UserStoppedSpeakingFrame after transcript for immediate LLM processing")
         
         self._accum_transcription_frames = []
         
