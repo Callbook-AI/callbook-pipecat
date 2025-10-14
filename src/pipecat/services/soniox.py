@@ -633,6 +633,12 @@ class SonioxSTTService(STTService):
             logger.info("⏸️  Sending UserStoppedSpeakingFrame BEFORE transcript")
             await self._handle_user_silence()
             logger.info("✅ UserStoppedSpeakingFrame sent")
+            # CRITICAL: Yield control to event loop to ensure the UserStoppedSpeakingFrame
+            # is fully processed by the aggregator before we send the TranscriptionFrame.
+            # Without this, both frames may be queued simultaneously and processed in
+            # the wrong order due to asyncio task scheduling.
+            await asyncio.sleep(0)
+            logger.info("✅ Yielded to event loop - aggregator state should be updated")
         
         # Create transcription frame
         frame = TranscriptionFrame(
