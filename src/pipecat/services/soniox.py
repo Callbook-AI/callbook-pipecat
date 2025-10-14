@@ -515,7 +515,7 @@ class SonioxSTTService(STTService):
             # Separate final vs non-final tokens (like working example)
             for token in tokens:
                 text = token.get("text", "")
-                if not text:
+                if not text or text == "<end>":  # Skip empty and <end> tokens
                     continue
                     
                 if token.get("is_final"):
@@ -527,7 +527,7 @@ class SonioxSTTService(STTService):
                     # Non-final token - will be sent as interim
                     non_final_tokens.append(token)
             
-            # Build texts for interim display
+            # Build texts for interim display (already filtered <end> tokens above)
             final_text = "".join(t["text"] for t in self._final_tokens)
             non_final_text = "".join(t["text"] for t in non_final_tokens)
             combined_text = final_text + non_final_text
@@ -572,8 +572,8 @@ class SonioxSTTService(STTService):
             logger.debug("No accumulated tokens to send")
             return
         
-        # Build final transcript from accumulated tokens
-        transcript = "".join(t["text"] for t in self._final_tokens)
+        # Build final transcript from accumulated tokens, filtering out <end> tokens
+        transcript = "".join(t["text"] for t in self._final_tokens if t["text"] != "<end>")
         
         if not transcript.strip():
             logger.debug("Empty accumulated transcript, skipping")
@@ -637,7 +637,8 @@ class SonioxSTTService(STTService):
             # is fully processed by the aggregator before we send the TranscriptionFrame.
             # Without this, both frames may be queued simultaneously and processed in
             # the wrong order due to asyncio task scheduling.
-            await asyncio.sleep(0)
+            # Increased delay from 0 to 0.05 to ensure proper processing order
+            await asyncio.sleep(0.05)
             logger.info("✅ Yielded to event loop - aggregator state should be updated")
         
         # Create transcription frame
