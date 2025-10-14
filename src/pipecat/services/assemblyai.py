@@ -570,11 +570,18 @@ class AssemblyAISTTService(STTService):
         if not len(self._accum_transcription_frames):
             return
 
-        logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
-
         # Combine all transcripts into one message
         full_text = " ".join([frame.text for frame in self._accum_transcription_frames])
         
+        # 🔥 CRITICAL: Check if this is a DUPLICATE transcript
+        # Fast response mode + interims can cause the SAME transcript to be sent multiple times
+        # This causes duplicate TranscriptionFrames which trigger "Emulating user started speaking"
+        if full_text.strip() == self._last_sent_transcript:
+            logger.debug(f"⚠️  Skipping DUPLICATE transcript: '{full_text}'")
+            self._accum_transcription_frames = []
+            return
+        
+        logger.debug(f"{self}: Sending {len(self._accum_transcription_frames)} accumulated transcription(s)")
         logger.debug(f"📝 Sending transcript as TranscriptionFrame: '{full_text}'")
         
         # ✅ Store what we're sending for deduplication
@@ -988,6 +995,17 @@ class AssemblyAISTTService(STTService):
     
         last_text = self._accum_transcription_frames[-1].text
         is_sentence_end = not self._is_accum_transcription(last_text)
+        
+        # 🔥 CRITICAL: Check for echo BEFORE sending
+        # If bot is speaking and this looks like echo, clear accumulation and return
+        if self._bot_speaking and self._bot_started_speaking_time:
+            time_since_bot_started = time.time() - self._bot_started_speaking_time
+            if time_since_bot_started < 0.8:
+                word_count = len(last_text.split())
+                if word_count <= 3:  # Short transcripts near bot speech start are likely echo
+                    logger.debug(f"Fast response: 🔇 Ignoring likely echo - bot speaking {time_since_bot_started:.2f}s, short transcript ({word_count} words): '{last_text}'")
+                    self._accum_transcription_frames = []
+                    return
         
         # CHANGED: Only consider length of text, not frame count (since we deduplicate now)
         word_count = len(last_text.split())
