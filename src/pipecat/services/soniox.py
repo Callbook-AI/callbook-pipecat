@@ -73,6 +73,7 @@ class SonioxSTTService(STTService):
         language: Language = Field(default=Language.EN_US)
         model: str = "stt-rt-preview"  # Soniox's real-time model (use stt-rt-preview or stt-rt-preview-v2)
         audio_format: str = "pcm_s16le"  # PCM 16-bit little-endian for best latency
+        num_audio_channels: int = 1  # Number of audio channels (1 for mono, 2 for stereo)
         enable_speaker_diarization: bool = False
         enable_language_identification: bool = False
         allow_interruptions: bool = True
@@ -241,6 +242,7 @@ class SonioxSTTService(STTService):
             logger.info(f"✓ Language: {self._language} -> {language_to_soniox_language(self._language)}")
             logger.info(f"✓ Sample Rate: {self.sample_rate} Hz")
             logger.info(f"✓ Audio Format: {self._params.audio_format}")
+            logger.info(f"✓ Audio Channels: {self._params.num_audio_channels}")
             logger.info(f"✓ Speaker Diarization: {self._params.enable_speaker_diarization}")
             logger.info(f"✓ Language ID: {self._params.enable_language_identification}")
 
@@ -268,6 +270,7 @@ class SonioxSTTService(STTService):
                 "model": self._params.model,
                 "audio_format": self._params.audio_format,
                 "sample_rate": self.sample_rate,
+                "num_audio_channels": self._params.num_audio_channels,
                 "language_hints": [language_hint],
                 "enable_speaker_diarization": self._params.enable_speaker_diarization,
                 "enable_language_identification": self._params.enable_language_identification,
