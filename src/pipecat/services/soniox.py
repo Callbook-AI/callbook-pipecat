@@ -602,8 +602,14 @@ class SonioxSTTService(STTService):
     async def _on_final_transcript_message(self, transcript: str, language: Language):
         """Handle final transcript - user has FINISHED speaking.
         
-        CRITICAL: Clear user_speaking state BEFORE sending transcript so aggregator
-        knows the user has stopped speaking and will process (not buffer) the transcript.
+        CRITICAL: We send UserStoppedSpeakingFrame BEFORE the TranscriptionFrame.
+        This ensures the aggregator receives them in the correct order:
+        1. UserStoppedSpeakingFrame clears aggregator's user_speaking state
+        2. TranscriptionFrame is received and processed immediately (not buffered)
+        
+        This ordering is essential because the aggregator checks user_speaking state
+        when it receives the transcript. If user_speaking=True, it buffers. If False,
+        it processes immediately.
         """
         logger.debug("🔵 Processing final transcript...")
         
@@ -620,13 +626,13 @@ class SonioxSTTService(STTService):
         # Handle first message tracking AFTER duplicate check
         self._handle_first_message(transcript)
         
-        # CRITICAL: Clear user_speaking state BEFORE sending transcript
-        # The aggregator checks this state when it receives the transcript
+        # CRITICAL: Send UserStoppedSpeakingFrame BEFORE the transcript
+        # This ensures the aggregator's user_speaking state is cleared
+        # before it receives the TranscriptionFrame
         if self._user_speaking:
-            logger.info("⏸️  Clearing user speaking state BEFORE sending transcript")
-            self._user_speaking = False
-            self._current_speech_start_time = None
-            logger.info("✅ User speaking state cleared")
+            logger.info("⏸️  Sending UserStoppedSpeakingFrame BEFORE transcript")
+            await self._handle_user_silence()
+            logger.info("✅ UserStoppedSpeakingFrame sent")
         
         # Create transcription frame
         frame = TranscriptionFrame(
@@ -637,7 +643,7 @@ class SonioxSTTService(STTService):
         )
         logger.debug(f"📦 Created TranscriptionFrame: '{transcript}'")
         
-        # Send the TranscriptionFrame - aggregator will process it because user_speaking=False
+        # Send the TranscriptionFrame - aggregator will process it immediately
         logger.info("=" * 70)
         logger.info("⬇️  SENDING FINAL TRANSCRIPTION TO AGGREGATOR")
         logger.info(f"   Text: '{transcript}'")
@@ -824,24 +830,32 @@ class SonioxSTTService(STTService):
         pass
 
     async def _handle_false_interim(self, current_time):
-        """Handle false interim detection."""
-        if not self._user_speaking:
-            return
-        if not self._last_interim_time:
-            return
-        if self._vad_active:
-            return
-        # Don't trigger false interim if we have accumulated final tokens waiting to be sent
-        if self._final_tokens:
-            return
-
-        last_interim_delay = current_time - self._last_interim_time
-
-        if last_interim_delay > FALSE_INTERIM_SECONDS:
-            return
-
-        logger.debug("False interim detected")
-        await self._handle_user_silence()
+        """Handle false interim detection.
+        
+        DISABLED: Soniox provides explicit endpoint detection via <end> tokens,
+        so we don't need false interim detection. This was causing premature
+        UserStoppedSpeakingFrame to be sent before all tokens arrived.
+        """
+        return
+        
+        # Legacy code kept for reference:
+        # if not self._user_speaking:
+        #     return
+        # if not self._last_interim_time:
+        #     return
+        # if self._vad_active:
+        #     return
+        # # Don't trigger false interim if we have accumulated final tokens waiting to be sent
+        # if self._final_tokens:
+        #     return
+        #
+        # last_interim_delay = current_time - self._last_interim_time
+        #
+        # if last_interim_delay > FALSE_INTERIM_SECONDS:
+        #     return
+        #
+        # logger.debug("False interim detected")
+        # await self._handle_user_silence()
 
     async def _async_handler(self, task_name):
         """Async handler for timeout management and false interim detection."""
