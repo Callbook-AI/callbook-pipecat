@@ -71,13 +71,15 @@ class SonioxSTTService(STTService):
 
     class InputParams(BaseModel):
         language: Language = Field(default=Language.EN_US)
-        model: str = "stt-rt-v2"  # Soniox's real-time model
+        model: str = "stt-rt-preview"  # Soniox's real-time model (use stt-rt-preview or stt-rt-preview-v2)
+        audio_format: str = "pcm_s16le"  # PCM 16-bit little-endian for best latency
         enable_speaker_diarization: bool = False
         enable_language_identification: bool = False
         allow_interruptions: bool = True
         detect_voicemail: bool = True
         fast_response: bool = False
         on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS
+        context: Optional[str] = None  # Optional context for better accuracy
 
     def __init__(
         self,
@@ -238,31 +240,50 @@ class SonioxSTTService(STTService):
             logger.info(f"✓ Model: {self._params.model}")
             logger.info(f"✓ Language: {self._language} -> {language_to_soniox_language(self._language)}")
             logger.info(f"✓ Sample Rate: {self.sample_rate} Hz")
+            logger.info(f"✓ Audio Format: {self._params.audio_format}")
             logger.info(f"✓ Speaker Diarization: {self._params.enable_speaker_diarization}")
             logger.info(f"✓ Language ID: {self._params.enable_language_identification}")
 
-            # Build WebSocket URI
-            uri = (
-                f"wss://api.soniox.com/v1/speech-to-text-rt"
-                f"?model={self._params.model}"
-                f"&language={language_to_soniox_language(self._language)}"
-                f"&sample_rate={self.sample_rate}"
-                f"&enable_speaker_diarization={str(self._params.enable_speaker_diarization).lower()}"
-                f"&enable_language_identification={str(self._params.enable_language_identification).lower()}"
-            )
+            # Use the correct Soniox WebSocket endpoint
+            uri = "wss://stt-rt.soniox.com/transcribe-websocket"
             
             logger.info(f"📡 WebSocket URI: {uri}")
-            logger.info(f"🔑 Auth Header: Bearer {self._api_key[:10]}...{self._api_key[-4:]}")
             logger.info("⏳ Attempting WebSocket connection...")
 
-            self._websocket = await websockets.connect(
-                uri, 
-                extra_headers={"Authorization": f"Bearer {self._api_key}"}
-            )
+            # Connect to WebSocket (no auth headers needed, will send config message)
+            self._websocket = await websockets.connect(uri)
             self._connection_active = True
             
+            logger.info("✅ WebSocket connection established")
+            logger.info("📤 Sending configuration message...")
+            
+            # Build language hints from the language parameter
+            language_code = language_to_soniox_language(self._language)
+            # Convert "en-US" to "en", "es-ES" to "es", etc.
+            language_hint = language_code.split('-')[0] if language_code else "en"
+            
+            # Send configuration message as per Soniox documentation
+            config = {
+                "api_key": self._api_key,
+                "model": self._params.model,
+                "audio_format": self._params.audio_format,
+                "sample_rate": self.sample_rate,
+                "language_hints": [language_hint],
+                "enable_speaker_diarization": self._params.enable_speaker_diarization,
+                "enable_language_identification": self._params.enable_language_identification,
+            }
+            
+            # Add context if provided
+            if self._params.context:
+                config["context"] = self._params.context
+            
+            logger.info(f"📤 Configuration: {json.dumps({k: v if k != 'api_key' else '***' for k, v in config.items()}, indent=2)}")
+            
+            # Send configuration as JSON text message
+            await self._websocket.send(json.dumps(config))
+            
             logger.info("=" * 70)
-            logger.info("✅ SUCCESSFULLY CONNECTED TO SONIOX")
+            logger.info("✅ SUCCESSFULLY CONFIGURED SONIOX SESSION")
             logger.info("=" * 70)
 
             if not self._receive_task:
@@ -409,6 +430,7 @@ class SonioxSTTService(STTService):
         """Process incoming transcription message.
         
         Handles transcript messages from Soniox with Deepgram-style processing.
+        Soniox returns 'tokens' array with 'is_final' flag per token.
         """
         try:
             logger.debug("=" * 70)
@@ -417,22 +439,37 @@ class SonioxSTTService(STTService):
             logger.debug(f"Message keys: {list(data.keys())}")
             logger.debug(f"Full message data: {json.dumps(data, indent=2)}")
             
+            # Check for error response
+            if "error_code" in data:
+                logger.error(f"❌ Soniox error: {data.get('error_code')} - {data.get('error_message')}")
+                await self.push_error(ErrorFrame(f"Soniox error: {data.get('error_message')}"))
+                return
+            
+            # Check for finished response
+            if data.get("finished"):
+                logger.info("✅ Soniox session finished")
+                return
+            
             await self.stop_ttfb_metrics()
 
-            words = data.get("words", [])
-            logger.debug(f"📝 Words count: {len(words)}")
+            # Soniox uses 'tokens' not 'words'
+            tokens = data.get("tokens", [])
+            logger.debug(f"📝 Tokens count: {len(tokens)}")
             
-            if not words:
-                logger.debug("⚠️  No words in message, skipping")
+            if not tokens:
+                logger.debug("⚠️  No tokens in message, skipping")
                 logger.debug("=" * 70)
                 return
 
-            transcript = " ".join(w["text"] for w in words)
-            is_final = data.get("final", False)
+            # Build transcript from tokens
+            transcript = " ".join(t["text"] for t in tokens)
+            
+            # Check if all tokens are final (Soniox marks each token with is_final)
+            is_final = all(t.get("is_final", False) for t in tokens)
             
             logger.debug(f"📝 Transcript: '{transcript}'")
             logger.debug(f"✓ Is Final: {is_final}")
-            logger.debug(f"✓ Length: {len(transcript)} chars, {len(words)} words")
+            logger.debug(f"✓ Length: {len(transcript)} chars, {len(tokens)} tokens")
 
             if not transcript.strip():
                 logger.debug("⚠️  Empty transcript after stripping, skipping")
@@ -461,10 +498,10 @@ class SonioxSTTService(STTService):
                 logger.info("✅ FINAL TRANSCRIPT RECEIVED")
                 logger.info("=" * 70)
                 logger.info(f"📝 '{transcript}'")
-                logger.info(f"🔤 Words: {len(words)}, Chars: {len(transcript)}")
+                logger.info(f"🔤 Tokens: {len(tokens)}, Chars: {len(transcript)}")
                 logger.info("=" * 70)
                 
-                self._record_stt_performance(transcript, words)
+                self._record_stt_performance(transcript, tokens)
                 await self._on_final_transcript_message(transcript, language_enum)
                 self._last_final_transcript_time = time.time()
                 self._last_time_transcription = time.time()
@@ -543,12 +580,13 @@ class SonioxSTTService(STTService):
         await self.push_frame(frame, FrameDirection.DOWNSTREAM)
         logger.debug("✓ InterimTranscriptionFrame pushed")
 
-    def _record_stt_performance(self, transcript, words):
+    def _record_stt_performance(self, transcript, tokens):
         """Record STT performance metrics."""
         if self._current_speech_start_time:
             elapsed = time.perf_counter() - self._current_speech_start_time
             self._stt_response_times.append(elapsed)
-            confidence = sum(w.get("confidence", 0) for w in words) / len(words) if words else 0
+            # Calculate average confidence from tokens
+            confidence = sum(t.get("confidence", 0) for t in tokens) / len(tokens) if tokens else 0
             logger.info(f"📊 ⚡ Soniox: ⏱️ STT Response Time: {elapsed:.3f}s")
             logger.info(f"   📝 Final Transcript: '{transcript}'")
             logger.info(f"   🎯 Avg. Confidence: {confidence:.2f}")
