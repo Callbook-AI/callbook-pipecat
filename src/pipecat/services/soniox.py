@@ -647,20 +647,15 @@ class SonioxSTTService(STTService):
         await self.push_frame(frame, FrameDirection.DOWNSTREAM)
         logger.info("✅ TranscriptionFrame sent DOWNSTREAM")
         
-        # NOW stop user speaking AFTER transcript is sent
+        # NOW clear the user speaking state internally
+        # IMPORTANT: Don't send UserStoppedSpeakingFrame here - let it be sent by the
+        # transport/VAD system naturally. Sending it here causes a race condition where
+        # the aggregator receives the transcript and stop frame at the same time, causing delays.
         if self._user_speaking:
-            logger.info("⏸️  User finished speaking - stopping user speaking state...")
+            logger.info("⏸️  Clearing internal user speaking state (not sending frames)")
             self._user_speaking = False
             self._current_speech_start_time = None
-            
-            # Send UserStoppedSpeakingFrame in BOTH directions
-            logger.info("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
-            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
-            
-            logger.info("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
-            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-            
-            logger.info("✅ User speaking state cleared")
+            logger.info("✅ Internal state cleared")
         
         await self.stop_processing_metrics()
 
