@@ -198,13 +198,8 @@ class SonioxSTTService(STTService):
         
         try:
             logger.debug(f"📤 Sending audio chunk #{self._audio_chunk_count} ({len(audio)} bytes)")
-            # Soniox requires audio to be sent as base64-encoded JSON message
-            import base64
-            audio_b64 = base64.b64encode(audio).decode('utf-8')
-            audio_message = {
-                "audio": audio_b64
-            }
-            await self._websocket.send(json.dumps(audio_message))
+            # Soniox accepts raw binary PCM audio after configuration
+            await self._websocket.send(audio)
             logger.debug(f"✓ Audio chunk sent successfully")
         except websockets.exceptions.ConnectionClosed as e:
             logger.error("=" * 70)
@@ -290,6 +285,21 @@ class SonioxSTTService(STTService):
             
             # Send configuration as JSON text message
             await self._websocket.send(json.dumps(config))
+            
+            logger.info("⏳ Waiting for configuration confirmation from Soniox...")
+            
+            # Wait for confirmation response before proceeding
+            try:
+                response = await asyncio.wait_for(self._websocket.recv(), timeout=5.0)
+                response_data = json.loads(response)
+                logger.info(f"📨 Received configuration response: {json.dumps(response_data, indent=2)}")
+                
+                # Check for error in confirmation
+                if "error_code" in response_data:
+                    raise Exception(f"Soniox config error: {response_data.get('error_message')}")
+                    
+            except asyncio.TimeoutError:
+                raise Exception("Timeout waiting for Soniox configuration confirmation")
             
             logger.info("=" * 70)
             logger.info("✅ SUCCESSFULLY CONFIGURED SONIOX SESSION")
