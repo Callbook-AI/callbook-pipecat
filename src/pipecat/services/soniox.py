@@ -602,8 +602,8 @@ class SonioxSTTService(STTService):
     async def _on_final_transcript_message(self, transcript: str, language: Language):
         """Handle final transcript - user has FINISHED speaking.
         
-        CRITICAL: Must maintain user_speaking=True WHILE sending transcript,
-        then clear it AFTER. This ensures the aggregator processes (not buffers) the transcript.
+        CRITICAL: Clear user_speaking state BEFORE sending transcript so aggregator
+        knows the user has stopped speaking and will process (not buffer) the transcript.
         """
         logger.debug("🔵 Processing final transcript...")
         
@@ -620,11 +620,13 @@ class SonioxSTTService(STTService):
         # Handle first message tracking AFTER duplicate check
         self._handle_first_message(transcript)
         
-        # CRITICAL: Ensure user_speaking is True while we send the transcript
-        # This matches Deepgram's behavior and ensures aggregator processes the transcript
-        if not self._user_speaking:
-            logger.debug("🔧 Setting user_speaking=True to ensure transcript is processed")
-            await self._handle_user_speaking()
+        # CRITICAL: Clear user_speaking state BEFORE sending transcript
+        # The aggregator checks this state when it receives the transcript
+        if self._user_speaking:
+            logger.info("⏸️  Clearing user speaking state BEFORE sending transcript")
+            self._user_speaking = False
+            self._current_speech_start_time = None
+            logger.info("✅ User speaking state cleared")
         
         # Create transcription frame
         frame = TranscriptionFrame(
@@ -635,24 +637,14 @@ class SonioxSTTService(STTService):
         )
         logger.debug(f"📦 Created TranscriptionFrame: '{transcript}'")
         
-        # Send the TranscriptionFrame WHILE user_speaking is True
+        # Send the TranscriptionFrame - aggregator will process it because user_speaking=False
         logger.info("=" * 70)
         logger.info("⬇️  SENDING FINAL TRANSCRIPTION TO AGGREGATOR")
         logger.info(f"   Text: '{transcript}'")
-        logger.info(f"   User speaking: {self._user_speaking} (should be True)")
+        logger.info(f"   User speaking: {self._user_speaking} (should be False)")
         logger.info("=" * 70)
         await self.push_frame(frame, FrameDirection.DOWNSTREAM)
         logger.info("✅ TranscriptionFrame sent DOWNSTREAM")
-        
-        # NOW clear the user speaking state internally
-        # IMPORTANT: Don't send UserStoppedSpeakingFrame here - let it be sent by the
-        # transport/VAD system naturally. Sending it here causes a race condition where
-        # the aggregator receives the transcript and stop frame at the same time, causing delays.
-        if self._user_speaking:
-            logger.info("⏸️  Clearing internal user speaking state (not sending frames)")
-            self._user_speaking = False
-            self._current_speech_start_time = None
-            logger.info("✅ Internal state cleared")
         
         await self.stop_processing_metrics()
 
