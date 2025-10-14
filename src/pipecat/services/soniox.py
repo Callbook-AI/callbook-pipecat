@@ -46,7 +46,7 @@ except ModuleNotFoundError:
 
 # Constants for optimized behavior (matching Deepgram patterns)
 DEFAULT_ON_NO_PUNCTUATION_SECONDS = 2
-IGNORE_REPEATED_MSG_AT_START_SECONDS = 4
+IGNORE_REPEATED_MSG_AT_START_SECONDS = 1.0  # Reduced from 4 to 1 second - more conservative for Soniox
 VOICEMAIL_DETECTION_SECONDS = 10
 FALSE_INTERIM_SECONDS = 1.3
 
@@ -564,13 +564,15 @@ class SonioxSTTService(STTService):
             logger.debug("🔍 Checking for voicemail...")
             await self._detect_and_handle_voicemail(transcript)
         
-        # Handle first message tracking
-        self._handle_first_message(transcript)
-        
-        # Check for repeated first message
+        # Check for repeated first message BEFORE setting first message
+        # This prevents interim transcripts from polluting the first message tracking
         if self._should_ignore_first_repeated_message(transcript):
             logger.debug(f"⏭️  Ignoring repeated first message: '{transcript}'")
             return
+        
+        # Handle first message tracking AFTER duplicate check
+        # This ensures we only track FINAL transcripts as first message
+        self._handle_first_message(transcript)
         
         logger.debug("👤 Triggering user speaking state...")
         await self._handle_user_speaking()
@@ -735,7 +737,11 @@ class SonioxSTTService(STTService):
         self._first_message_time = time.time()
 
     def _should_ignore_first_repeated_message(self, text):
-        """Check if this is a repeated first message to ignore."""
+        """Check if this is a repeated first message to ignore.
+        
+        Only ignores EXACT duplicates within 1 second - Soniox is less prone
+        to repetition than Deepgram, so we're very conservative here.
+        """
         if not self._first_message:
             return False
         
@@ -743,7 +749,8 @@ class SonioxSTTService(STTService):
         if time_since_first_message > IGNORE_REPEATED_MSG_AT_START_SECONDS:
             return False
         
-        return is_equivalent_basic(text, self._first_message)
+        # EXACT match only (not fuzzy match) to avoid false positives
+        return text.strip() == self._first_message.strip()
 
     async def _detect_and_handle_voicemail(self, transcript: str):
         """Detect and handle voicemail messages."""
