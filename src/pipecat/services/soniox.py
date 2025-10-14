@@ -603,7 +603,11 @@ class SonioxSTTService(STTService):
         self._last_time_transcription = time.time()
 
     async def _on_final_transcript_message(self, transcript: str, language: Language):
-        """Handle final transcript - user has FINISHED speaking."""
+        """Handle final transcript - user has FINISHED speaking.
+        
+        CRITICAL: Must maintain user_speaking=True WHILE sending transcript,
+        then clear it AFTER. This ensures the aggregator processes (not buffers) the transcript.
+        """
         logger.debug("🔵 Processing final transcript...")
         
         # Check for voicemail detection
@@ -619,6 +623,12 @@ class SonioxSTTService(STTService):
         # Handle first message tracking AFTER duplicate check
         self._handle_first_message(transcript)
         
+        # CRITICAL: Ensure user_speaking is True while we send the transcript
+        # This matches Deepgram's behavior and ensures aggregator processes the transcript
+        if not self._user_speaking:
+            logger.debug("🔧 Setting user_speaking=True to ensure transcript is processed")
+            await self._handle_user_speaking()
+        
         # Create transcription frame
         frame = TranscriptionFrame(
             transcript,
@@ -628,8 +638,16 @@ class SonioxSTTService(STTService):
         )
         logger.debug(f"📦 Created TranscriptionFrame: '{transcript}'")
         
-        # CRITICAL: Stop user speaking FIRST (if still active), then send transcript
-        # When we receive is_final=true, the user has FINISHED speaking
+        # Send the TranscriptionFrame WHILE user_speaking is True
+        logger.info("=" * 70)
+        logger.info("⬇️  SENDING FINAL TRANSCRIPTION TO AGGREGATOR")
+        logger.info(f"   Text: '{transcript}'")
+        logger.info(f"   User speaking: {self._user_speaking} (should be True)")
+        logger.info("=" * 70)
+        await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+        logger.info("✅ TranscriptionFrame sent DOWNSTREAM")
+        
+        # NOW stop user speaking AFTER transcript is sent
         if self._user_speaking:
             logger.info("⏸️  User finished speaking - stopping user speaking state...")
             self._user_speaking = False
@@ -642,18 +660,7 @@ class SonioxSTTService(STTService):
             logger.info("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
             
-            # Small delay to ensure state propagates before transcript
-            await asyncio.sleep(0.001)
             logger.info("✅ User speaking state cleared")
-        
-        # Now send the TranscriptionFrame - aggregator should process it (not buffer)
-        logger.info("=" * 70)
-        logger.info("⬇️  SENDING FINAL TRANSCRIPTION TO AGGREGATOR")
-        logger.info(f"   Text: '{transcript}'")
-        logger.info(f"   User speaking: {self._user_speaking} (should be False)")
-        logger.info("=" * 70)
-        await self.push_frame(frame, FrameDirection.DOWNSTREAM)
-        logger.info("✅ TranscriptionFrame sent DOWNSTREAM")
         
         await self.stop_processing_metrics()
 
