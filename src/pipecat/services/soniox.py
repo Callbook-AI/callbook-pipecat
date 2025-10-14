@@ -631,8 +631,17 @@ class SonioxSTTService(STTService):
         # before it receives the TranscriptionFrame
         if self._user_speaking:
             logger.info("⏸️  Sending UserStoppedSpeakingFrame BEFORE transcript")
-            await self._handle_user_silence()
-            logger.info("✅ UserStoppedSpeakingFrame sent")
+            # Set state first
+            self._user_speaking = False
+            self._current_speech_start_time = None
+            
+            # Send UserStoppedSpeakingFrame in BOTH directions to ensure aggregator gets it
+            logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
+            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+            logger.debug("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
+            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+            
+            logger.info("✅ UserStoppedSpeakingFrame sent in both directions")
             # CRITICAL: Yield control to event loop to ensure the UserStoppedSpeakingFrame
             # is fully processed by the aggregator before we send the TranscriptionFrame.
             # Without this, both frames may be queued simultaneously and processed in
