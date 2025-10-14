@@ -794,8 +794,8 @@ class SonioxSTTService(STTService):
         # Store what we're sending for deduplication
         self._last_sent_transcript = full_text.strip()
         
-        # Ensure transport processes UserStoppedSpeakingFrame BEFORE TranscriptionFrame
-        # This prevents race condition in transport's frame emulation logic
+        # Ensure aggregator and transport process UserStoppedSpeakingFrame BEFORE TranscriptionFrame
+        # Send in BOTH directions to prevent race condition
         was_user_speaking = self._user_speaking
         logger.info(f"👤 User was speaking: {was_user_speaking}")
         
@@ -803,12 +803,19 @@ class SonioxSTTService(STTService):
             logger.info("⏸️  Stopping user speaking state before sending transcript...")
             self._user_speaking = False
             self._current_speech_start_time = None
+            
+            # Send UPSTREAM for transport
             logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
             logger.info("✓ UserStoppedSpeakingFrame sent UPSTREAM")
             
-            # Give transport time to process UserStoppedSpeakingFrame
-            logger.debug("⏳ Waiting 1ms for transport to process UserStoppedSpeakingFrame...")
+            # Send DOWNSTREAM for aggregator to update its state
+            logger.debug("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
+            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+            logger.info("✓ UserStoppedSpeakingFrame sent DOWNSTREAM")
+            
+            # Give aggregator time to process UserStoppedSpeakingFrame
+            logger.debug("⏳ Waiting 1ms for aggregator to process UserStoppedSpeakingFrame...")
             await asyncio.sleep(0.001)  # 1ms for async frame processing
             logger.debug("✓ Wait complete")
         
