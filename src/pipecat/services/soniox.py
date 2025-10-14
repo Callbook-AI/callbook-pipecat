@@ -541,9 +541,6 @@ class SonioxSTTService(STTService):
                 # Check if we should ignore this transcription
                 should_ignore = await self._should_ignore_transcription(combined_text)
                 if not should_ignore:
-                    # Update interim time for false interim detection
-                    self._last_interim_time = time.time()
-                    
                     # Send as interim (even finals are interim until endpoint detected)
                     await self._on_interim_transcript_message(combined_text, self._language)
             
@@ -666,6 +663,10 @@ class SonioxSTTService(STTService):
         Both non-final tokens AND accumulated finals (before endpoint) are sent as interim.
         """
         logger.debug(f"🟡 Interim: '{transcript[:50]}...' ({len(transcript)} chars)")
+        
+        # Update interim time for false interim detection
+        # This ensures we don't trigger false interim while receiving transcripts
+        self._last_interim_time = time.time()
         
         # Only trigger user speaking state if not already active AND VAD hasn't gone inactive
         # This prevents repeated interim transcripts from re-triggering after VAD detected silence
@@ -837,6 +838,9 @@ class SonioxSTTService(STTService):
         if not self._last_interim_time:
             return
         if self._vad_active:
+            return
+        # Don't trigger false interim if we have accumulated final tokens waiting to be sent
+        if self._final_tokens:
             return
 
         last_interim_delay = current_time - self._last_interim_time
