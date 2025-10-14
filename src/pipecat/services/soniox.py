@@ -133,9 +133,7 @@ class SonioxSTTService(STTService):
         self._last_audio_chunk_time = None
         self._audio_chunk_count = 0
 
-        # Transcript accumulation (following Deepgram pattern)
-        self._accum_transcription_frames = []
-        self._last_time_accum_transcription = time.time()
+        # Transcript tracking
         self._last_interim_time = None
         self._last_sent_transcript = None
 
@@ -586,21 +584,40 @@ class SonioxSTTService(STTService):
         )
         logger.debug(f"📦 Created TranscriptionFrame: '{transcript}'")
         
-        # Handle accumulation or immediate sending based on fast response mode
-        is_accum = self._is_accum_transcription(transcript)
-        logger.debug(f"✓ Should accumulate: {is_accum} (ends with punctuation: {not is_accum})")
+        # Send immediately - the key is to NOT be in user_speaking state when sending
+        # So we stop user speaking FIRST, then send the transcript
+        if self._user_speaking:
+            logger.info("⏸️  Stopping user speaking state before sending transcript...")
+            self._user_speaking = False
+            self._current_speech_start_time = None
+            
+            # Send UserStoppedSpeakingFrame in BOTH directions
+            logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
+            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+            
+            logger.debug("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
+            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+            
+            # Small delay to ensure state is updated
+            await asyncio.sleep(0.001)
         
-        if is_accum:
-            logger.debug("📥 Appending to accumulation buffer...")
-            self._append_accum_transcription(frame)
-        else:
-            logger.debug("📥 Appending to buffer and sending immediately...")
-            self._append_accum_transcription(frame)
-            await self._send_accum_transcriptions()
+        # Now send the TranscriptionFrame
+        logger.info("⬇️  Pushing TranscriptionFrame DOWNSTREAM")
+        logger.info(f"   Text: '{transcript}'")
+        await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+        logger.info("✅ TranscriptionFrame sent DOWNSTREAM")
+        
+        await self.stop_processing_metrics()
 
     async def _on_interim_transcript_message(self, transcript: str, language: Language):
-        """Handle interim transcript."""
+        """Handle interim transcript.
+        
+        Interim transcripts are sent immediately and DO NOT stop user_speaking state.
+        This allows the aggregator to see real-time progress without triggering processing.
+        """
         logger.debug("🟡 Processing interim transcript...")
+        
+        # Trigger user speaking state if not already active
         logger.debug("👤 Triggering user speaking state...")
         await self._handle_user_speaking()
         
@@ -712,21 +729,7 @@ class SonioxSTTService(STTService):
         
         return False
 
-    def _is_accum_transcription(self, text: str):
-        """Check if transcription should be accumulated."""
-        END_OF_PHRASE_CHARACTERS = ['.', '?', '!']
-        
-        text = text.strip()
-        if not text:
-            return True
-        
-        return not text[-1] in END_OF_PHRASE_CHARACTERS
-    
-    def _append_accum_transcription(self, frame: TranscriptionFrame):
-        """Append transcription frame to accumulation buffer."""
-        self._last_time_accum_transcription = time.time()
-        self._accum_transcription_frames.append(frame)
-        logger.debug(f"Accumulated transcript: '{frame.text}' (total: {len(self._accum_transcription_frames)})")
+
 
     def _handle_first_message(self, text):
         """Track first message for duplicate detection."""
@@ -765,96 +768,16 @@ class SonioxSTTService(STTService):
             logger.info(f"🔊 Voicemail detected: '{transcript}'")
             await self.push_frame(VoicemailFrame())
 
-    async def _send_accum_transcriptions(self):
-        """Send accumulated transcriptions following Deepgram/AssemblyAI pattern."""
-        logger.info("=" * 70)
-        logger.info("📤 SENDING ACCUMULATED TRANSCRIPTIONS")
-        logger.info("=" * 70)
-        
-        if not len(self._accum_transcription_frames):
-            logger.debug("⚠️  No accumulated frames to send")
-            logger.info("=" * 70)
-            return
 
-        # Combine all transcripts into one message
-        full_text = " ".join([frame.text for frame in self._accum_transcription_frames])
-        logger.info(f"📝 Combined transcript: '{full_text}'")
-        logger.info(f"📊 Total frames: {len(self._accum_transcription_frames)}")
-        
-        # Check if this is a DUPLICATE transcript
-        if full_text.strip() == self._last_sent_transcript:
-            logger.warning(f"⚠️  DUPLICATE transcript detected, skipping: '{full_text}'")
-            logger.warning(f"   Last sent: '{self._last_sent_transcript}'")
-            self._accum_transcription_frames = []
-            logger.info("=" * 70)
-            return
-        
-        logger.info(f"✓ New transcript (not duplicate)")
-        
-        # Store what we're sending for deduplication
-        self._last_sent_transcript = full_text.strip()
-        
-        # Ensure aggregator and transport process UserStoppedSpeakingFrame BEFORE TranscriptionFrame
-        # Send in BOTH directions to prevent race condition
-        was_user_speaking = self._user_speaking
-        logger.info(f"👤 User was speaking: {was_user_speaking}")
-        
-        if was_user_speaking:
-            logger.info("⏸️  Stopping user speaking state before sending transcript...")
-            self._user_speaking = False
-            self._current_speech_start_time = None
-            
-            # Send UPSTREAM for transport
-            logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
-            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
-            logger.info("✓ UserStoppedSpeakingFrame sent UPSTREAM")
-            
-            # Send DOWNSTREAM for aggregator to update its state
-            logger.debug("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
-            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-            logger.info("✓ UserStoppedSpeakingFrame sent DOWNSTREAM")
-            
-            # Give aggregator time to process UserStoppedSpeakingFrame
-            logger.debug("⏳ Waiting 1ms for aggregator to process UserStoppedSpeakingFrame...")
-            await asyncio.sleep(0.001)  # 1ms for async frame processing
-            logger.debug("✓ Wait complete")
-        
-        # Now send TranscriptionFrame
-        logger.info("⬇️  Pushing TranscriptionFrame DOWNSTREAM")
-        logger.info(f"   Text: '{full_text}'")
-        logger.info(f"   Language: {self._language}")
-        
-        await self.push_frame(
-            TranscriptionFrame(
-                full_text,
-                "",
-                time_now_iso8601(),
-                self._language
-            ),
-            FrameDirection.DOWNSTREAM
-        )
-        logger.info("✅ TranscriptionFrame sent DOWNSTREAM")
-        
-        self._accum_transcription_frames = []
-        logger.debug("📊 Stopping processing metrics...")
-        await self.stop_processing_metrics()
-        
-        logger.info("=" * 70)
 
     async def _async_handle_accum_transcription(self, current_time):
-        """Handle accumulated transcriptions with timeout."""
-        if not self._last_interim_time:
-            self._last_interim_time = 0.0
-
-        reference_time = max(self._last_interim_time, self._last_time_accum_transcription)
-
-        if self._fast_response:
-            await self._fast_response_send_accum_transcriptions()
-            return
-            
-        if current_time - reference_time > self._on_no_punctuation_seconds and len(self._accum_transcription_frames):
-            logger.debug("Sending accum transcription because of timeout")
-            await self._send_accum_transcriptions()
+        """Handle accumulated transcriptions with timeout.
+        
+        Note: With Soniox, we send transcripts immediately when is_final=true,
+        so this method is mostly for compatibility. The timeout logic is not needed.
+        """
+        # No longer accumulating - transcripts are sent immediately
+        pass
 
     async def _handle_false_interim(self, current_time):
         """Handle false interim detection."""
@@ -884,40 +807,13 @@ class SonioxSTTService(STTService):
             await self._handle_false_interim(current_time)
 
     async def _fast_response_send_accum_transcriptions(self):
-        """Send accumulated transcriptions immediately if fast response is enabled."""
-        if not self._fast_response:
-            return
-
-        if len(self._accum_transcription_frames) == 0:
-            return
-
-        current_time = time.time()
-
-        if self._vad_active:
-            # Do not send if VAD is active and it's been less than 10 seconds
-            if self._first_message_time and (current_time - self._first_message_time) > 10.0:
-                return
-
-        last_message_time = max(self._last_interim_time, self._last_time_accum_transcription)
-
-        is_short_sentence = len(self._accum_transcription_frames) <= 2
-        is_sentence_end = not self._is_accum_transcription(self._accum_transcription_frames[-1].text)
-        time_since_last_message = current_time - last_message_time
-
-        if is_short_sentence:
-            if is_sentence_end:
-                logger.debug("Fast response: Sending accum transcriptions - short sentence & end of phrase")
-                await self._send_accum_transcriptions()
-            elif time_since_last_message > self._on_no_punctuation_seconds:
-                logger.debug("Fast response: Sending accum transcriptions - short sentence & timeout")
-                await self._send_accum_transcriptions()
-        else:
-            if is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds:
-                logger.debug("Fast response: Sending accum transcriptions - long sentence & end of phrase")
-                await self._send_accum_transcriptions()
-            elif not is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds * 2:
-                logger.debug("Fast response: Sending accum transcriptions - long sentence & timeout")
-                await self._send_accum_transcriptions()
+        """Send accumulated transcriptions immediately if fast response is enabled.
+        
+        Note: No longer used with Soniox as transcripts are sent immediately.
+        Kept for compatibility.
+        """
+        # No longer accumulating - transcripts are sent immediately
+        pass
 
     def get_stt_stats(self) -> Dict:
         """Get comprehensive STT performance statistics."""
