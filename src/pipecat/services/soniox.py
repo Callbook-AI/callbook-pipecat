@@ -554,7 +554,7 @@ class SonioxSTTService(STTService):
             logger.error("=" * 70)
 
     async def _on_final_transcript_message(self, transcript: str, language: Language):
-        """Handle final transcript following Deepgram pattern."""
+        """Handle final transcript - user has FINISHED speaking."""
         logger.debug("🔵 Processing final transcript...")
         
         # Check for voicemail detection
@@ -563,17 +563,12 @@ class SonioxSTTService(STTService):
             await self._detect_and_handle_voicemail(transcript)
         
         # Check for repeated first message BEFORE setting first message
-        # This prevents interim transcripts from polluting the first message tracking
         if self._should_ignore_first_repeated_message(transcript):
             logger.debug(f"⏭️  Ignoring repeated first message: '{transcript}'")
             return
         
         # Handle first message tracking AFTER duplicate check
-        # This ensures we only track FINAL transcripts as first message
         self._handle_first_message(transcript)
-        
-        logger.debug("👤 Triggering user speaking state...")
-        await self._handle_user_speaking()
         
         # Create transcription frame
         frame = TranscriptionFrame(
@@ -584,26 +579,30 @@ class SonioxSTTService(STTService):
         )
         logger.debug(f"📦 Created TranscriptionFrame: '{transcript}'")
         
-        # Send immediately - the key is to NOT be in user_speaking state when sending
-        # So we stop user speaking FIRST, then send the transcript
+        # CRITICAL: Stop user speaking FIRST (if still active), then send transcript
+        # When we receive is_final=true, the user has FINISHED speaking
         if self._user_speaking:
-            logger.info("⏸️  Stopping user speaking state before sending transcript...")
+            logger.info("⏸️  User finished speaking - stopping user speaking state...")
             self._user_speaking = False
             self._current_speech_start_time = None
             
             # Send UserStoppedSpeakingFrame in BOTH directions
-            logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
+            logger.info("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
             
-            logger.debug("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
+            logger.info("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
             
-            # Small delay to ensure state is updated
+            # Small delay to ensure state propagates before transcript
             await asyncio.sleep(0.001)
+            logger.info("✅ User speaking state cleared")
         
-        # Now send the TranscriptionFrame
-        logger.info("⬇️  Pushing TranscriptionFrame DOWNSTREAM")
+        # Now send the TranscriptionFrame - aggregator should process it (not buffer)
+        logger.info("=" * 70)
+        logger.info("⬇️  SENDING FINAL TRANSCRIPTION TO AGGREGATOR")
         logger.info(f"   Text: '{transcript}'")
+        logger.info(f"   User speaking: {self._user_speaking} (should be False)")
+        logger.info("=" * 70)
         await self.push_frame(frame, FrameDirection.DOWNSTREAM)
         logger.info("✅ TranscriptionFrame sent DOWNSTREAM")
         
@@ -612,14 +611,18 @@ class SonioxSTTService(STTService):
     async def _on_interim_transcript_message(self, transcript: str, language: Language):
         """Handle interim transcript.
         
-        Interim transcripts are sent immediately and DO NOT stop user_speaking state.
+        Interim transcripts are sent immediately and trigger user_speaking state ONLY once.
         This allows the aggregator to see real-time progress without triggering processing.
         """
         logger.debug("🟡 Processing interim transcript...")
         
-        # Trigger user speaking state if not already active
-        logger.debug("👤 Triggering user speaking state...")
-        await self._handle_user_speaking()
+        # Only trigger user speaking state if not already active
+        # This prevents repeated interim transcripts from re-triggering after we've stopped
+        if not self._user_speaking:
+            logger.debug("👤 Triggering user speaking state for first time...")
+            await self._handle_user_speaking()
+        else:
+            logger.debug("👤 User already speaking, not re-triggering")
         
         frame = InterimTranscriptionFrame(
             transcript,
