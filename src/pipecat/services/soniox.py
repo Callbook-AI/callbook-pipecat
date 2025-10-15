@@ -580,6 +580,21 @@ class SonioxSTTService(STTService):
             self._final_tokens = []
             return
         
+        # CRITICAL: Check if we should ignore this transcription (e.g., bot speaking with interruptions disabled)
+        should_ignore = await self._should_ignore_transcription(transcript)
+        if should_ignore:
+            logger.info("=" * 70)
+            logger.info("🚫 IGNORING ACCUMULATED FINAL TRANSCRIPT")
+            logger.info("=" * 70)
+            logger.info(f"📝 '{transcript}'")
+            logger.info(f"🔤 Tokens: {len(self._final_tokens)}, Chars: {len(transcript)}")
+            logger.info(f"❌ Reason: Bot speaking and interruptions disabled")
+            logger.info("=" * 70)
+            # Clear accumulated tokens for next utterance
+            self._final_tokens = []
+            self._last_token_time = None
+            return
+        
         logger.info("=" * 70)
         logger.info("✅ SENDING ACCUMULATED FINAL TRANSCRIPT")
         logger.info("=" * 70)
