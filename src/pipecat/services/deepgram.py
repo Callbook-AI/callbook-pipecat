@@ -370,8 +370,11 @@ class DeepgramGladiaDetector:
             self._receive_task = asyncio.create_task(self._receive_task_handler())
             logger.info("✅ DeepgramGladiaDetector: Intelligent backup ready")
         except Exception as e:
-            logger.exception(f"❌ DeepgramGladiaDetector failed to start: {e}")
-            raise
+            logger.error(f"❌ DeepgramGladiaDetector failed to start: {e}")
+            logger.warning("⚠️ Continuing without Gladia backup - using Deepgram only")
+            # Don't raise - allow system to continue with Deepgram only
+            self._websocket = None
+            self._receive_task = None
 
     async def send_audio(self, chunk: bytes):
         """Send audio chunk to Gladia backup service."""
@@ -1005,7 +1008,17 @@ class DeepgramSTTService(STTService):
                 
             if self._intelligent_gladia_backup:
                 logger.info("🎯 DeepgramSTTService: Starting intelligent Gladia backup...")
-                await self._intelligent_gladia_backup.start()
+                try:
+                    await self._intelligent_gladia_backup.start()
+                    if self._intelligent_gladia_backup._websocket is None:
+                        logger.warning("⚠️ DeepgramSTTService: Gladia backup failed to connect, disabling backup")
+                        self._intelligent_gladia_backup = None
+                        self._backup_enabled = False
+                except Exception as e:
+                    logger.error(f"❌ DeepgramSTTService: Gladia backup startup failed: {e}")
+                    logger.warning("⚠️ DeepgramSTTService: Continuing without Gladia backup")
+                    self._intelligent_gladia_backup = None
+                    self._backup_enabled = False
             
             if not self._async_handler_task:
                 self._async_handler_task = self.create_monitored_task(self._async_handler)
@@ -1023,10 +1036,13 @@ class DeepgramSTTService(STTService):
                 await self._sibling_deepgram.stop()
                 logger.debug("🔧 DeepgramSTTService: Sibling Deepgram stopped")
                 
-            if self._intelligent_gladia_backup:
+            if self._intelligent_gladia_backup and self._backup_enabled:
                 logger.info("🎯 DeepgramSTTService: Stopping intelligent Gladia backup...")
-                await self._intelligent_gladia_backup.stop()
-                logger.info("🎯 DeepgramSTTService: ✅ Intelligent backup stopped")
+                try:
+                    await self._intelligent_gladia_backup.stop()
+                    logger.info("🎯 DeepgramSTTService: ✅ Intelligent backup stopped")
+                except Exception as e:
+                    logger.warning(f"⚠️ DeepgramSTTService: Error stopping backup: {e}")
                 
         except Exception as e:
             logger.exception(f"{self} exception in stop: {e}")
@@ -1068,10 +1084,16 @@ class DeepgramSTTService(STTService):
                 await self._sibling_deepgram.send_audio(audio)
                 
             # Send to intelligent backup service (always send, it will filter appropriately)
-            if self._intelligent_gladia_backup:
+            if self._intelligent_gladia_backup and self._backup_enabled:
                 logger.trace(f"🎯 DeepgramSTTService: Sending audio to intelligent backup")
-                await self._intelligent_gladia_backup.send_audio(audio)
-            elif not deepgram_sent:
+                try:
+                    await self._intelligent_gladia_backup.send_audio(audio)
+                except Exception as e:
+                    logger.debug(f"⚠️ DeepgramSTTService: Backup audio send failed: {e}, disabling backup")
+                    self._intelligent_gladia_backup = None
+                    self._backup_enabled = False
+            
+            if not deepgram_sent and not self._backup_enabled:
                 # If neither Deepgram nor backup is available, we have a problem
                 logger.error("🚨 DeepgramSTTService: No STT services available (Deepgram down, no backup)")
                 yield ErrorFrame("No STT services available")
