@@ -71,7 +71,8 @@ class SonioxSTTService(STTService):
 
     class InputParams(BaseModel):
         language: Language = Field(default=Language.EN_US)
-        model: str = "stt-rt-preview"  # Soniox's real-time model (use stt-rt-preview or stt-rt-preview-v2)
+        model: str = "stt-rt-v3" 
+        language_hints: List[str] = ["es"]
         audio_format: str = "pcm_s16le"  # PCM 16-bit little-endian for best latency
         num_channels: int = 1  # Number of audio channels (1 for mono, 2 for stereo) - MUST match Soniox API
         enable_speaker_diarization: bool = False
