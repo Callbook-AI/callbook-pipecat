@@ -15,6 +15,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from pipecat.frames.frames import (
+    AudioRawFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
@@ -71,7 +72,7 @@ class SonioxSTTService(STTService):
 
     class InputParams(BaseModel):
         language: Language = Field(default=Language.EN_US)
-        model: str = "stt-rt-v3" 
+        model: str = "stt-rt-v3"
         language_hints: List[str] = ["es"]
         audio_format: str = "pcm_s16le"  # PCM 16-bit little-endian for best latency
         num_channels: int = 1  # Number of audio channels (1 for mono, 2 for stereo) - MUST match Soniox API
@@ -81,6 +82,7 @@ class SonioxSTTService(STTService):
         detect_voicemail: bool = True
         fast_response: bool = False
         on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS
+        audio_passthrough: bool = True  # Pass audio through to downstream processors (e.g., for recording)
         context: Optional[str] = None  # Optional context for better accuracy
 
     def __init__(
@@ -93,6 +95,7 @@ class SonioxSTTService(STTService):
         language: Language = None,
         enable_partials: bool = None,
         allow_interruptions: bool = None,
+        audio_passthrough: bool = None,
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -112,6 +115,8 @@ class SonioxSTTService(STTService):
                 params.fast_response = enable_partials
             if allow_interruptions is not None:
                 params.allow_interruptions = allow_interruptions
+            if audio_passthrough is not None:
+                params.audio_passthrough = audio_passthrough
 
         self._params = params
         self._language = params.language
@@ -119,6 +124,7 @@ class SonioxSTTService(STTService):
         self.detect_voicemail = params.detect_voicemail
         self._fast_response = params.fast_response
         self._on_no_punctuation_seconds = params.on_no_punctuation_seconds
+        self._audio_passthrough = params.audio_passthrough
 
         # State tracking (following Deepgram pattern)
         self._user_speaking = False
@@ -154,6 +160,7 @@ class SonioxSTTService(STTService):
         logger.info(f"  Model: {params.model}, Language: {params.language.value}")
         logger.info(f"  Allow interruptions: {self._allow_stt_interruptions}")
         logger.info(f"  Fast response: {self._fast_response}, Detect voicemail: {self.detect_voicemail}")
+        logger.info(f"  Audio passthrough: {self._audio_passthrough}")
         logger.info(f"  No punctuation timeout: {self._on_no_punctuation_seconds}s")
 
     def can_generate_metrics(self) -> bool:
@@ -187,15 +194,26 @@ class SonioxSTTService(STTService):
         """Process an audio chunk for STT transcription.
 
         Streams audio data to Soniox websocket for real-time transcription.
-        
+
         :param audio: Audio data as bytes (PCM 16-bit)
-        :yield: None (transcription frames are pushed via callbacks)
+        :yield: AudioRawFrame if audio_passthrough is enabled, otherwise None
         """
+        # If audio passthrough is enabled, yield the audio frame for downstream processors
+        # This must happen BEFORE sending to Soniox to maintain proper frame ordering
+        if self._audio_passthrough:
+            yield AudioRawFrame(
+                audio=audio,
+                sample_rate=self.sample_rate,
+                num_channels=1
+            )
+
         if not self._websocket or not self._connection_active:
             logger.debug("⚠️  WebSocket not connected, skipping audio chunk")
             logger.debug(f"   WebSocket exists: {self._websocket is not None}")
             logger.debug(f"   Connection active: {self._connection_active}")
-            yield None
+            # Even if not connected, we already passed through the audio if enabled
+            if not self._audio_passthrough:
+                yield None
             return
 
         if self._current_speech_start_time is None:
@@ -207,12 +225,12 @@ class SonioxSTTService(STTService):
 
         self._audio_chunk_count += 1
         self._last_audio_chunk_time = time.time()
-        
+
         # Log every 50 chunks to avoid spam
         if self._audio_chunk_count % 50 == 0:
             elapsed = time.perf_counter() - self._current_speech_start_time
             logger.debug(f"🎤 Audio streaming: {self._audio_chunk_count} chunks sent ({elapsed:.2f}s elapsed)")
-        
+
         try:
             # logger.debug(f"📤 Sending audio chunk #{self._audio_chunk_count} ({len(audio)} bytes)")
             # Soniox accepts raw binary PCM audio after configuration
@@ -238,7 +256,10 @@ class SonioxSTTService(STTService):
             logger.error(f"Chunks sent: {self._audio_chunk_count}")
             logger.exception("Full traceback:")
             logger.error("=" * 70)
-        yield None
+
+        # Only yield None if audio passthrough is disabled
+        if not self._audio_passthrough:
+            yield None
 
     async def _connect(self):
         """Establish websocket connection to Soniox service."""
