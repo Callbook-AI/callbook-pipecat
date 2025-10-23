@@ -847,7 +847,7 @@ class SonioxSTTService(STTService):
             return
         
         # Check if transcript matches voicemail patterns
-        if voicemail(transcript):
+        if voicemail.is_text_voicemail(transcript):
             logger.info(f"🔊 Voicemail detected: '{transcript}'")
             await self.push_frame(VoicemailFrame())
 
