@@ -15,7 +15,6 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from pipecat.frames.frames import (
-    AudioRawFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
@@ -82,7 +81,6 @@ class SonioxSTTService(STTService):
         detect_voicemail: bool = True
         fast_response: bool = False
         on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS
-        audio_passthrough: bool = True  # Pass audio through to downstream processors (e.g., for recording)
         context: Optional[str] = None  # Optional context for better accuracy
 
     def __init__(
@@ -95,7 +93,6 @@ class SonioxSTTService(STTService):
         language: Language = None,
         enable_partials: bool = None,
         allow_interruptions: bool = None,
-        audio_passthrough: bool = None,
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -115,8 +112,6 @@ class SonioxSTTService(STTService):
                 params.fast_response = enable_partials
             if allow_interruptions is not None:
                 params.allow_interruptions = allow_interruptions
-            if audio_passthrough is not None:
-                params.audio_passthrough = audio_passthrough
 
         self._params = params
         self._language = params.language
@@ -124,7 +119,6 @@ class SonioxSTTService(STTService):
         self.detect_voicemail = params.detect_voicemail
         self._fast_response = params.fast_response
         self._on_no_punctuation_seconds = params.on_no_punctuation_seconds
-        self._audio_passthrough = params.audio_passthrough
 
         # State tracking (following Deepgram pattern)
         self._user_speaking = False
@@ -160,7 +154,6 @@ class SonioxSTTService(STTService):
         logger.info(f"  Model: {params.model}, Language: {params.language.value}")
         logger.info(f"  Allow interruptions: {self._allow_stt_interruptions}")
         logger.info(f"  Fast response: {self._fast_response}, Detect voicemail: {self.detect_voicemail}")
-        logger.info(f"  Audio passthrough: {self._audio_passthrough}")
         logger.info(f"  No punctuation timeout: {self._on_no_punctuation_seconds}s")
 
     def can_generate_metrics(self) -> bool:
@@ -196,24 +189,13 @@ class SonioxSTTService(STTService):
         Streams audio data to Soniox websocket for real-time transcription.
 
         :param audio: Audio data as bytes (PCM 16-bit)
-        :yield: AudioRawFrame if audio_passthrough is enabled, otherwise None
+        :yield: None (transcription frames are pushed via callbacks)
         """
-        # If audio passthrough is enabled, yield the audio frame for downstream processors
-        # This must happen BEFORE sending to Soniox to maintain proper frame ordering
-        if self._audio_passthrough:
-            yield AudioRawFrame(
-                audio=audio,
-                sample_rate=self.sample_rate,
-                num_channels=1
-            )
-
         if not self._websocket or not self._connection_active:
             logger.debug("⚠️  WebSocket not connected, skipping audio chunk")
             logger.debug(f"   WebSocket exists: {self._websocket is not None}")
             logger.debug(f"   Connection active: {self._connection_active}")
-            # Even if not connected, we already passed through the audio if enabled
-            if not self._audio_passthrough:
-                yield None
+            yield None
             return
 
         if self._current_speech_start_time is None:
@@ -257,9 +239,7 @@ class SonioxSTTService(STTService):
             logger.exception("Full traceback:")
             logger.error("=" * 70)
 
-        # Only yield None if audio passthrough is disabled
-        if not self._audio_passthrough:
-            yield None
+        yield None
 
     async def _connect(self):
         """Establish websocket connection to Soniox service."""
