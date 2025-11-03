@@ -467,14 +467,39 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 await self._send_text(text)
                 await self.start_tts_usage_metrics(text)
             except Exception as e:
-                logger.error(f"{self} error sending message: {e}")
+                error_msg = str(e)
+                logger.error(f"{self} error sending message: {error_msg}")
+
+                # Check if this is a fatal error (auth, quota, etc.)
+                error_msg_lower = error_msg.lower()
+                is_fatal = any(keyword in error_msg_lower for keyword in [
+                    'policy violation', 'invalid api key', 'authentication',
+                    'quota', 'insufficient', 'characters', 'subscription', 'billing', '1008'
+                ])
+
+                # Yield ErrorFrame for monitoring
+                yield ErrorFrame(
+                    error=f"ElevenLabs: {error_msg[:200]}",
+                    fatal=is_fatal
+                )
+
                 yield TTSStoppedFrame()
                 await self._disconnect()
-                await self._connect()
+
+                # If it's a fatal error, don't try to reconnect
+                if not is_fatal:
+                    await self._connect()
                 return
             yield None
         except Exception as e:
-            logger.error(f"{self} exception: {e}")
+            error_msg = str(e)
+            logger.error(f"{self} exception: {error_msg}")
+
+            # This is a top-level exception in run_tts, likely fatal
+            yield ErrorFrame(
+                error=f"ElevenLabs fatal: {error_msg[:200]}",
+                fatal=True
+            )
 
 
 class ElevenLabsHttpTTSService(TTSService):
@@ -596,8 +621,21 @@ class ElevenLabsHttpTTSService(TTSService):
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    logger.error(f"{self} error: {error_text}")
-                    yield ErrorFrame(error=f"ElevenLabs API error: {error_text}")
+                    error_lower = error_text.lower()
+                    status_code = response.status
+
+                    logger.error(f"ElevenLabs API error (status {status_code}): {error_text}")
+
+                    # Determine if error is fatal
+                    is_fatal = any(keyword in error_lower for keyword in [
+                        'authentication', 'api key', 'unauthorized', '401', '403',
+                        'quota', 'insufficient', 'subscription', 'billing', 'characters', 'limit'
+                    ])
+
+                    yield ErrorFrame(
+                        error=f"ElevenLabs API error (status {status_code}): {error_text[:200]}",
+                        fatal=is_fatal
+                    )
                     return
 
                 await self.start_tts_usage_metrics(text)
@@ -611,8 +649,23 @@ class ElevenLabsHttpTTSService(TTSService):
                         await self.stop_ttfb_metrics()
                         yield TTSAudioRawFrame(chunk, self.sample_rate, 1)
         except Exception as e:
-            logger.error(f"Error in run_tts: {e}")
-            yield ErrorFrame(error=str(e))
+            # Convert exception to string FIRST to avoid f-string issues
+            error_type = type(e).__name__
+            error_msg = str(e)
+            error_msg_lower = error_msg.lower()
+
+            logger.error(f"ElevenLabs {error_type}: {error_msg}")
+
+            # Determine if error is fatal
+            is_fatal = any(keyword in error_msg_lower for keyword in [
+                'authentication', 'api key', 'unauthorized', '401', '403',
+                'quota', 'insufficient', 'subscription', 'billing', 'characters', 'limit'
+            ])
+
+            yield ErrorFrame(
+                error=f"ElevenLabs {error_type}: {error_msg[:200]}",
+                fatal=is_fatal
+            )
         finally:
             await self.stop_ttfb_metrics()
             yield TTSStoppedFrame()

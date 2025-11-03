@@ -223,7 +223,20 @@ class GladiaSTTService(STTService):
                 logger.warning("Gladia connection closed during receive.")
                 break
             except Exception as e:
-                logger.error(f"Error in Gladia receive task: {e}")
+                error_msg = str(e)
+                logger.error(f"Error in Gladia receive task: {error_msg}")
+
+                # Push ErrorFrame before breaking
+                error_msg_lower = error_msg.lower()
+                is_fatal = any(keyword in error_msg_lower for keyword in [
+                    'authentication', 'unauthorized', '401', '403', 'invalid', 'api key',
+                    'quota', 'suspended'
+                ])
+
+                await self.push_error(ErrorFrame(
+                    error=f"Gladia receive error: {error_msg[:200]}",
+                    fatal=is_fatal
+                ))
                 break
 
     async def _on_message(self, data: Dict):

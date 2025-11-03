@@ -229,15 +229,27 @@ class SonioxSTTService(STTService):
             logger.warning("Attempting to reconnect...")
             await self._reconnect()
         except Exception as e:
+            error_msg = str(e)
             logger.error("=" * 70)
             logger.error("❌ ERROR SENDING AUDIO TO SONIOX")
             logger.error("=" * 70)
             logger.error(f"Error Type: {type(e).__name__}")
-            logger.error(f"Error Message: {e}")
+            logger.error(f"Error Message: {error_msg}")
             logger.error(f"Audio chunk size: {len(audio)} bytes")
             logger.error(f"Chunks sent: {self._audio_chunk_count}")
             logger.exception("Full traceback:")
             logger.error("=" * 70)
+
+            # Push ErrorFrame
+            error_msg_lower = error_msg.lower()
+            is_fatal = any(keyword in error_msg_lower for keyword in [
+                'authentication', 'unauthorized', 'api key', 'quota'
+            ])
+
+            await self.push_error(ErrorFrame(
+                error=f"Soniox audio send error: {error_msg[:200]}",
+                fatal=is_fatal
+            ))
 
         yield None
 
@@ -453,14 +465,26 @@ class SonioxSTTService(STTService):
                 continue
                 
             except Exception as e:
+                error_msg = str(e)
                 logger.error("=" * 70)
                 logger.error("❌ ERROR IN SONIOX RECEIVE TASK")
                 logger.error("=" * 70)
                 logger.error(f"Error Type: {type(e).__name__}")
-                logger.error(f"Error Message: {e}")
+                logger.error(f"Error Message: {error_msg}")
                 logger.error(f"Messages received before error: {message_count}")
                 logger.exception("Full traceback:")
                 logger.error("=" * 70)
+
+                # Push ErrorFrame before breaking
+                error_msg_lower = error_msg.lower()
+                is_fatal = any(keyword in error_msg_lower for keyword in [
+                    'authentication', 'unauthorized', 'api key', 'quota', 'closed'
+                ])
+
+                await self.push_error(ErrorFrame(
+                    error=f"Soniox receive error: {error_msg[:200]}",
+                    fatal=is_fatal
+                ))
                 break
         
         logger.info(f"🎧 Receive task handler stopped. Total messages received: {message_count}")
@@ -556,14 +580,21 @@ class SonioxSTTService(STTService):
             logger.debug("=" * 70)
                 
         except Exception as e:
+            error_msg = str(e)
             logger.error("=" * 70)
             logger.error("❌ ERROR PROCESSING SONIOX MESSAGE")
             logger.error("=" * 70)
             logger.error(f"Error Type: {type(e).__name__}")
-            logger.error(f"Error Message: {e}")
+            logger.error(f"Error Message: {error_msg}")
             logger.error(f"Message data: {data if 'data' in locals() else 'N/A'}")
             logger.exception("Full traceback:")
             logger.error("=" * 70)
+
+            # Push ErrorFrame for message processing errors
+            await self.push_error(ErrorFrame(
+                error=f"Soniox message processing error: {error_msg[:200]}",
+                fatal=False
+            ))
 
     async def _send_accumulated_transcription(self):
         """Send accumulated final tokens as a complete TranscriptionFrame.
