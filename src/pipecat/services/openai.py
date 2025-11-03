@@ -18,7 +18,6 @@ from openai import (
     NOT_GIVEN,
     AsyncOpenAI,
     AsyncStream,
-    BadRequestError,
     DefaultAsyncHttpxClient,
 )
 from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
@@ -350,8 +349,33 @@ class BaseOpenAILLMService(LLMService):
                 logger.debug(f"{self}: Just before processing context {context}")
                 await self._process_context(context)
                 logger.debug(f"{self}: Just after processing context {context}")
-            except httpx.TimeoutException:
+            except httpx.TimeoutException as e:
+                logger.error(f"{self} timeout error: {e}")
                 await self._call_event_handler("on_completion_timeout")
+                # Push ErrorFrame for monitoring
+                await self.push_error(ErrorFrame(
+                    error=f"OpenAI timeout: {str(e)}",
+                    fatal=False
+                ))
+            except Exception as e:
+                # Catch ALL other exceptions (AuthenticationError, RateLimitError, etc.)
+                logger.error(f"{self} unexpected error: {e}", exc_info=True)
+
+                # Determine if error is fatal based on error type
+                error_str = str(e).lower()
+                is_fatal = any(keyword in error_str for keyword in [
+                    'authentication', 'api key', 'unauthorized', '401', '403',
+                    'quota', 'insufficient', 'rate limit', 'billing'
+                ])
+
+                # Push ErrorFrame for monitoring
+                await self.push_error(ErrorFrame(
+                    error=f"OpenAI error: {type(e).__name__} - {str(e)}",
+                    fatal=is_fatal
+                ))
+
+                # Re-raise so the pipeline can handle it
+                raise
             finally:
                 logger.debug(f"{self}: Just before stopping processing metrics")
                 await self.stop_processing_metrics()
@@ -583,8 +607,17 @@ class OpenAITTSService(TTSService):
                     logger.error(
                         f"{self} error getting audio (status: {r.status_code}, error: {error})"
                     )
+
+                    # Determine if error is fatal
+                    error_lower = error.lower()
+                    is_fatal = any(keyword in error_lower for keyword in [
+                        'authentication', 'api key', 'unauthorized', '401', '403',
+                        'quota', 'insufficient', 'subscription', 'billing'
+                    ])
+
                     yield ErrorFrame(
-                        f"Error getting audio (status: {r.status_code}, error: {error})"
+                        error=f"OpenAI TTS error (status {r.status_code}): {error}",
+                        fatal=is_fatal
                     )
                     return
 
@@ -599,8 +632,20 @@ class OpenAITTSService(TTSService):
                         frame = TTSAudioRawFrame(chunk, self.sample_rate, 1)
                         yield frame
                 yield TTSStoppedFrame()
-        except BadRequestError as e:
+        except Exception as e:
             logger.exception(f"{self} error generating TTS: {e}")
+
+            # Determine if error is fatal
+            error_str = str(e).lower()
+            is_fatal = any(keyword in error_str for keyword in [
+                'authentication', 'api key', 'unauthorized', '401', '403',
+                'quota', 'insufficient', 'subscription', 'billing', 'characters', 'limit'
+            ])
+
+            yield ErrorFrame(
+                error=f"OpenAI TTS error: {type(e).__name__} - {str(e)}",
+                fatal=is_fatal
+            )
 
 
 # internal use only -- todo: refactor

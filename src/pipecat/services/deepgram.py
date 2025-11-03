@@ -1102,7 +1102,18 @@ class DeepgramSTTService(STTService):
             yield None
         except Exception as e:
             logger.exception(f"{self} exception in run_stt: {e}")
-            yield ErrorFrame(f"run_stt error: {e}")
+
+            # Determine if error is fatal
+            error_str = str(e).lower()
+            is_fatal = any(keyword in error_str for keyword in [
+                'authentication', 'unauthorized', '401', '403', 'invalid', 'api key',
+                'quota', 'suspended', 'credentials', 'connection'
+            ])
+
+            yield ErrorFrame(
+                error=f"Deepgram STT error: {type(e).__name__} - {str(e)}",
+                fatal=is_fatal
+            )
 
 
     async def _connect(self):
@@ -1140,7 +1151,7 @@ class DeepgramSTTService(STTService):
             logger.debug(f"Deepgram addons: {self._addons}")
             
             connection_result = await self._connection.start(options=self._settings, addons=self._addons)
-            
+
             if not connection_result:
                 logger.error(f"{self}: unable to connect to Deepgram - connection failed")
                 raise ConnectionError("Failed to establish Deepgram connection")
@@ -1148,6 +1159,20 @@ class DeepgramSTTService(STTService):
                 logger.debug(f"Successfully connected to Deepgram")
         except Exception as e:
             logger.exception(f"{self} exception in _connect: {e}")
+
+            # Determine if error is fatal
+            error_str = str(e).lower()
+            is_fatal = any(keyword in error_str for keyword in [
+                'authentication', 'unauthorized', '401', '403', 'invalid', 'api key',
+                'quota', 'suspended', 'credentials'
+            ])
+
+            # Push ErrorFrame for monitoring
+            await self.push_error(ErrorFrame(
+                error=f"Deepgram connection error: {type(e).__name__} - {str(e)}",
+                fatal=is_fatal
+            ))
+
             # Don't raise here to allow fallback to backup system only
             logger.warning(f"Deepgram connection failed, backup system will handle all transcriptions")
             await self._on_error(error=e)
@@ -1184,10 +1209,29 @@ class DeepgramSTTService(STTService):
         if self._error_count >= len(self.backup_api_keys):
             logger.error(f"{self} too many connection errors, no more backup API keys available")
 
+            # Push ErrorFrame for monitoring - this is fatal
+            await self.push_error(ErrorFrame(
+                error=f"Deepgram fatal error: Too many connection errors - {str(error)}",
+                fatal=True
+            ))
+
             if self._on_connection_error:
                 self._on_connection_error(DeepgramFatalError(f"Too many connection errors: {error}"))
             return
-        
+
+        # Determine if error is fatal
+        error_str = str(error).lower()
+        is_fatal = any(keyword in error_str for keyword in [
+            'authentication', 'unauthorized', '401', '403', 'invalid', 'api key',
+            'quota', 'suspended', 'credentials'
+        ])
+
+        # Push ErrorFrame for monitoring
+        await self.push_error(ErrorFrame(
+            error=f"Deepgram error: {str(error)}",
+            fatal=is_fatal
+        ))
+
         if self._on_connection_error:
             self._on_connection_error(DeepgramError(f"Connection error: {error}"))
 
