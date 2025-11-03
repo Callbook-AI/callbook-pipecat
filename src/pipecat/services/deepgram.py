@@ -1101,17 +1101,21 @@ class DeepgramSTTService(STTService):
                 
             yield None
         except Exception as e:
-            logger.exception(f"{self} exception in run_stt: {e}")
+            # Convert exception to string FIRST to avoid f-string issues
+            error_type = type(e).__name__
+            error_msg = str(e)
+            error_msg_lower = error_msg.lower()
+
+            logger.error(f"Deepgram STT {error_type}: {error_msg}")
 
             # Determine if error is fatal
-            error_str = str(e).lower()
-            is_fatal = any(keyword in error_str for keyword in [
+            is_fatal = any(keyword in error_msg_lower for keyword in [
                 'authentication', 'unauthorized', '401', '403', 'invalid', 'api key',
                 'quota', 'suspended', 'credentials', 'connection'
             ])
 
             yield ErrorFrame(
-                error=f"Deepgram STT error: {type(e).__name__} - {str(e)}",
+                error=f"Deepgram STT {error_type}: {error_msg[:200]}",
                 fatal=is_fatal
             )
 
@@ -1158,20 +1162,27 @@ class DeepgramSTTService(STTService):
             else:
                 logger.debug(f"Successfully connected to Deepgram")
         except Exception as e:
-            logger.exception(f"{self} exception in _connect: {e}")
+            # Convert exception to string FIRST to avoid f-string issues
+            error_type = type(e).__name__
+            error_msg = str(e)
+            error_msg_lower = error_msg.lower()
+
+            logger.error(f"Deepgram connection {error_type}: {error_msg}")
 
             # Determine if error is fatal
-            error_str = str(e).lower()
-            is_fatal = any(keyword in error_str for keyword in [
+            is_fatal = any(keyword in error_msg_lower for keyword in [
                 'authentication', 'unauthorized', '401', '403', 'invalid', 'api key',
                 'quota', 'suspended', 'credentials'
             ])
 
             # Push ErrorFrame for monitoring
-            await self.push_error(ErrorFrame(
-                error=f"Deepgram connection error: {type(e).__name__} - {str(e)}",
-                fatal=is_fatal
-            ))
+            try:
+                await self.push_error(ErrorFrame(
+                    error=f"Deepgram connection {error_type}: {error_msg[:200]}",
+                    fatal=is_fatal
+                ))
+            except Exception as push_error:
+                logger.error(f"Failed to push Deepgram connection error frame: {push_error}")
 
             # Don't raise here to allow fallback to backup system only
             logger.warning(f"Deepgram connection failed, backup system will handle all transcriptions")
@@ -1201,7 +1212,9 @@ class DeepgramSTTService(STTService):
 
     async def _on_error(self, *args, **kwargs):
         error: ErrorResponse = kwargs["error"]
-        logger.warning(f"{self} connection error, will retry: {error}")
+        error_msg = str(error)
+
+        logger.warning(f"{self} connection error, will retry: {error_msg}")
         await self.stop_all_metrics()
         # NOTE(aleix): we don't disconnect (i.e. call finish on the connection)
         # because this triggers more errors internally in the Deepgram SDK. So,
@@ -1210,27 +1223,33 @@ class DeepgramSTTService(STTService):
             logger.error(f"{self} too many connection errors, no more backup API keys available")
 
             # Push ErrorFrame for monitoring - this is fatal
-            await self.push_error(ErrorFrame(
-                error=f"Deepgram fatal error: Too many connection errors - {str(error)}",
-                fatal=True
-            ))
+            try:
+                await self.push_error(ErrorFrame(
+                    error=f"Deepgram fatal: Too many connection errors - {error_msg[:200]}",
+                    fatal=True
+                ))
+            except Exception as push_error:
+                logger.error(f"Failed to push Deepgram fatal error frame: {push_error}")
 
             if self._on_connection_error:
                 self._on_connection_error(DeepgramFatalError(f"Too many connection errors: {error}"))
             return
 
         # Determine if error is fatal
-        error_str = str(error).lower()
-        is_fatal = any(keyword in error_str for keyword in [
+        error_msg_lower = error_msg.lower()
+        is_fatal = any(keyword in error_msg_lower for keyword in [
             'authentication', 'unauthorized', '401', '403', 'invalid', 'api key',
             'quota', 'suspended', 'credentials'
         ])
 
         # Push ErrorFrame for monitoring
-        await self.push_error(ErrorFrame(
-            error=f"Deepgram error: {str(error)}",
-            fatal=is_fatal
-        ))
+        try:
+            await self.push_error(ErrorFrame(
+                error=f"Deepgram error: {error_msg[:200]}",
+                fatal=is_fatal
+            ))
+        except Exception as push_error:
+            logger.error(f"Failed to push Deepgram error frame: {push_error}")
 
         if self._on_connection_error:
             self._on_connection_error(DeepgramError(f"Connection error: {error}"))

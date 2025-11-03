@@ -596,17 +596,19 @@ class ElevenLabsHttpTTSService(TTSService):
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    logger.error(f"{self} error: {error_text}")
+                    error_lower = error_text.lower()
+                    status_code = response.status
+
+                    logger.error(f"ElevenLabs API error (status {status_code}): {error_text}")
 
                     # Determine if error is fatal
-                    error_lower = error_text.lower()
                     is_fatal = any(keyword in error_lower for keyword in [
                         'authentication', 'api key', 'unauthorized', '401', '403',
                         'quota', 'insufficient', 'subscription', 'billing', 'characters', 'limit'
                     ])
 
                     yield ErrorFrame(
-                        error=f"ElevenLabs API error (status {response.status}): {error_text}",
+                        error=f"ElevenLabs API error (status {status_code}): {error_text[:200]}",
                         fatal=is_fatal
                     )
                     return
@@ -622,17 +624,21 @@ class ElevenLabsHttpTTSService(TTSService):
                         await self.stop_ttfb_metrics()
                         yield TTSAudioRawFrame(chunk, self.sample_rate, 1)
         except Exception as e:
-            logger.error(f"Error in run_tts: {e}", exc_info=True)
+            # Convert exception to string FIRST to avoid f-string issues
+            error_type = type(e).__name__
+            error_msg = str(e)
+            error_msg_lower = error_msg.lower()
+
+            logger.error(f"ElevenLabs {error_type}: {error_msg}")
 
             # Determine if error is fatal
-            error_str = str(e).lower()
-            is_fatal = any(keyword in error_str for keyword in [
+            is_fatal = any(keyword in error_msg_lower for keyword in [
                 'authentication', 'api key', 'unauthorized', '401', '403',
                 'quota', 'insufficient', 'subscription', 'billing', 'characters', 'limit'
             ])
 
             yield ErrorFrame(
-                error=f"ElevenLabs error: {type(e).__name__} - {str(e)}",
+                error=f"ElevenLabs {error_type}: {error_msg[:200]}",
                 fatal=is_fatal
             )
         finally:
