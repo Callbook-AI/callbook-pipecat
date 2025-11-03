@@ -1594,7 +1594,14 @@ class DeepgramSTTService(STTService):
             await self._process_transcript_message(result, backup_source)
 
         except Exception as e:
-            logger.exception(f"{self} unexpected error in _on_message: {e}")
+            error_msg = str(e)
+            logger.error(f"{self} unexpected error in _on_message: {error_msg}")
+
+            # Push ErrorFrame for message processing errors
+            await self.push_error(ErrorFrame(
+                error=f"Deepgram message processing error: {error_msg[:200]}",
+                fatal=False
+            ))
 
     def _log_transcript_receipt(self, result, backup_source):
         """Log transcript receipt with source and metadata."""

@@ -467,14 +467,39 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 await self._send_text(text)
                 await self.start_tts_usage_metrics(text)
             except Exception as e:
-                logger.error(f"{self} error sending message: {e}")
+                error_msg = str(e)
+                logger.error(f"{self} error sending message: {error_msg}")
+
+                # Check if this is a fatal error (auth, quota, etc.)
+                error_msg_lower = error_msg.lower()
+                is_fatal = any(keyword in error_msg_lower for keyword in [
+                    'policy violation', 'invalid api key', 'authentication',
+                    'quota', 'insufficient', 'characters', 'subscription', 'billing', '1008'
+                ])
+
+                # Yield ErrorFrame for monitoring
+                yield ErrorFrame(
+                    error=f"ElevenLabs: {error_msg[:200]}",
+                    fatal=is_fatal
+                )
+
                 yield TTSStoppedFrame()
                 await self._disconnect()
-                await self._connect()
+
+                # If it's a fatal error, don't try to reconnect
+                if not is_fatal:
+                    await self._connect()
                 return
             yield None
         except Exception as e:
-            logger.error(f"{self} exception: {e}")
+            error_msg = str(e)
+            logger.error(f"{self} exception: {error_msg}")
+
+            # This is a top-level exception in run_tts, likely fatal
+            yield ErrorFrame(
+                error=f"ElevenLabs fatal: {error_msg[:200]}",
+                fatal=True
+            )
 
 
 class ElevenLabsHttpTTSService(TTSService):
