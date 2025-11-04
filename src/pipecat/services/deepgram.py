@@ -1165,25 +1165,7 @@ class DeepgramSTTService(STTService):
             # Convert exception to string FIRST to avoid f-string issues
             error_type = type(e).__name__
             error_msg = str(e)
-            error_msg_lower = error_msg.lower()
-
             logger.error(f"Deepgram connection {error_type}: {error_msg}")
-
-            # Determine if error is fatal
-            is_fatal = any(keyword in error_msg_lower for keyword in [
-                'authentication', 'unauthorized', '401', '403', 'invalid', 'api key',
-                'quota', 'suspended', 'credentials'
-            ])
-
-            # Push ErrorFrame for monitoring
-            try:
-                await self.push_error(ErrorFrame(
-                    error=f"Deepgram connection {error_type}: {error_msg[:200]}",
-                    fatal=is_fatal
-                ))
-            except Exception as push_error:
-                logger.error(f"Failed to push Deepgram connection error frame: {push_error}")
-
             # Don't raise here to allow fallback to backup system only
             logger.warning(f"Deepgram connection failed, backup system will handle all transcriptions")
             await self._on_error(error=e)
