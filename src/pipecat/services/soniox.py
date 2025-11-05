@@ -872,15 +872,15 @@ class SonioxSTTService(STTService):
     async def _detect_and_handle_voicemail(self, transcript: str):
         """Detect and handle voicemail messages."""
         time_since_init = self._time_since_init()
-        
+
         # Only detect voicemail in the first N seconds
         if time_since_init > VOICEMAIL_DETECTION_SECONDS:
             return
-        
+
         # Check if transcript matches voicemail patterns
         if voicemail.is_text_voicemail(transcript):
             logger.info(f"🔊 Voicemail detected: '{transcript}'")
-            await self.push_frame(VoicemailFrame())
+            await self.push_frame(VoicemailFrame(text=transcript))
 
 
 
