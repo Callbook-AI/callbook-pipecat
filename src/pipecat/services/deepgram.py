@@ -1396,9 +1396,14 @@ class DeepgramSTTService(STTService):
         current_time = time.time()
 
         if self._vad_active:
-            # Do not send if VAD is active and it's been less than 10 seconds since first message
-            if self._first_message_time and (current_time - self._first_message_time) > 10.0:
-                return
+            # Bypass VAD check if we have a complete sentence (ends with punctuation)
+            if len(self._accum_transcription_frames) > 0:
+                last_text = self._accum_transcription_frames[-1].text.strip()
+                has_ending_punctuation = last_text and last_text[-1] in '.?!'
+                if not has_ending_punctuation:
+                    # Do not send if VAD is active and it's been less than 10 seconds since first message
+                    if self._first_message_time and (current_time - self._first_message_time) > 10.0:
+                        return
 
 
         last_message_time = max(self._last_interim_time, self._last_time_accum_transcription)
