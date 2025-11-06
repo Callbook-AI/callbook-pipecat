@@ -71,7 +71,22 @@ class WebsocketService(ABC):
                         self._websocket.close_rcvd_then_sent,
                     )
             except Exception as e:
-                retry_count += 1
+                # Check if this is a recoverable WebSocket close code
+                is_recoverable = False
+                if isinstance(e, (websockets.ConnectionClosedOK, websockets.ConnectionClosedError)):
+                    # Extract close code if available
+                    close_code = getattr(e, 'rcvd_code', None) or getattr(e, 'code', None)
+                    # 1012 = Service Restart (server is restarting, should reconnect)
+                    # 1013 = Try Again Later (temporary issue)
+                    recoverable_codes = {1012, 1013}
+                    if close_code in recoverable_codes:
+                        is_recoverable = True
+                        logger.info(f"{self} received recoverable close code {close_code}, reconnecting without penalty")
+
+                # Only increment retry count for non-recoverable errors
+                if not is_recoverable:
+                    retry_count += 1
+
                 if retry_count >= MAX_RETRIES:
                     message = f"{self} error receiving messages: {e}"
                     logger.error(message)
@@ -81,9 +96,9 @@ class WebsocketService(ABC):
                 logger.exception(f"{self} connection error, will retry: {e}",)
 
                 try:
-                    if await self._reconnect_websocket(retry_count):
+                    if await self._reconnect_websocket(retry_count if not is_recoverable else 1):
                         retry_count = 0  # Reset counter on successful reconnection
-                    wait_time = exponential_backoff_time(retry_count)
+                    wait_time = exponential_backoff_time(retry_count if not is_recoverable else 0)
                     await asyncio.sleep(wait_time)
                 except Exception as reconnect_error:
                     logger.error(f"{self} reconnection failed: {reconnect_error}")
