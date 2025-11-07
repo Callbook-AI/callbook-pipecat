@@ -393,30 +393,43 @@ class SonioxSTTService(STTService):
         logger.info("=" * 70)
         logger.info("🔌 DISCONNECTING FROM SONIOX")
         logger.info("=" * 70)
-        
+
+        # Mark connection as inactive first to stop loops
         self._connection_active = False
-        
+
         # Cancel async handler task
         if self._async_handler_task:
             logger.debug("⏹️  Cancelling async handler task...")
-            await self.cancel_task(self._async_handler_task)
-            self._async_handler_task = None
-            logger.debug("✓ Async handler task cancelled")
-        
+            try:
+                await self.cancel_task(self._async_handler_task)
+            except Exception as e:
+                logger.debug(f"Error cancelling async handler task: {e}")
+            finally:
+                self._async_handler_task = None
+                logger.debug("✓ Async handler task cancelled")
+
         # Cancel receive task
         if self._receive_task:
             logger.debug("⏹️  Cancelling receive task...")
-            await self.cancel_task(self._receive_task)
-            self._receive_task = None
-            logger.debug("✓ Receive task cancelled")
-        
+            try:
+                await self.cancel_task(self._receive_task)
+            except Exception as e:
+                logger.debug(f"Error cancelling receive task: {e}")
+            finally:
+                self._receive_task = None
+                logger.debug("✓ Receive task cancelled")
+
         # Close websocket
         if self._websocket:
             logger.debug("🔌 Closing WebSocket connection...")
-            await self._websocket.close()
-            self._websocket = None
-            logger.info("✅ Disconnected from Soniox")
-        
+            try:
+                await self._websocket.close()
+            except Exception as e:
+                logger.debug(f"Error closing websocket: {e}")
+            finally:
+                self._websocket = None
+                logger.info("✅ Disconnected from Soniox")
+
         logger.info("=" * 70)
 
     async def _reconnect(self):
@@ -433,61 +446,75 @@ class SonioxSTTService(STTService):
         """Handle incoming transcription messages from Soniox."""
         logger.info("🎧 Receive task handler started and listening for messages...")
         message_count = 0
-        
-        while self._connection_active:
-            try:
-                logger.debug("⏳ Waiting for message from Soniox WebSocket...")
-                message = await self._websocket.recv()
-                message_count += 1
-                logger.debug(f"📨 Received message #{message_count} from Soniox")
-                logger.debug(f"📨 Raw message length: {len(message)} bytes")
-                logger.debug(f"📨 Raw message preview: {message[:200]}..." if len(message) > 200 else f"📨 Raw message: {message}")
-                
-                await self._on_message(json.loads(message))
-                
-            except websockets.exceptions.ConnectionClosed as e:
-                logger.warning("=" * 70)
-                logger.warning("⚠️  SONIOX CONNECTION CLOSED DURING RECEIVE")
-                logger.warning("=" * 70)
-                logger.warning(f"Close Code: {e.code if hasattr(e, 'code') else 'N/A'}")
-                logger.warning(f"Close Reason: {e.reason if hasattr(e, 'reason') else 'N/A'}")
-                logger.warning(f"Messages received before close: {message_count}")
-                logger.warning("=" * 70)
-                break
-                
-            except json.JSONDecodeError as e:
-                logger.error("=" * 70)
-                logger.error("❌ JSON DECODE ERROR")
-                logger.error("=" * 70)
-                logger.error(f"Error: {e}")
-                logger.error(f"Message that failed to parse: {message[:500] if 'message' in locals() else 'N/A'}")
-                logger.error("=" * 70)
-                continue
-                
-            except Exception as e:
-                error_msg = str(e)
-                logger.error("=" * 70)
-                logger.error("❌ ERROR IN SONIOX RECEIVE TASK")
-                logger.error("=" * 70)
-                logger.error(f"Error Type: {type(e).__name__}")
-                logger.error(f"Error Message: {error_msg}")
-                logger.error(f"Messages received before error: {message_count}")
-                logger.exception("Full traceback:")
-                logger.error("=" * 70)
 
-                # Push ErrorFrame before breaking
-                error_msg_lower = error_msg.lower()
-                is_fatal = any(keyword in error_msg_lower for keyword in [
-                    'authentication', 'unauthorized', 'api key', 'quota', 'closed'
-                ])
+        try:
+            while self._connection_active:
+                try:
+                    logger.debug("⏳ Waiting for message from Soniox WebSocket...")
+                    message = await self._websocket.recv()
+                    message_count += 1
+                    logger.debug(f"📨 Received message #{message_count} from Soniox")
+                    logger.debug(f"📨 Raw message length: {len(message)} bytes")
+                    logger.debug(f"📨 Raw message preview: {message[:200]}..." if len(message) > 200 else f"📨 Raw message: {message}")
 
-                await self.push_error(ErrorFrame(
-                    error=f"Soniox receive error: {error_msg[:200]}",
-                    fatal=is_fatal
-                ))
-                break
-        
-        logger.info(f"🎧 Receive task handler stopped. Total messages received: {message_count}")
+                    await self._on_message(json.loads(message))
+
+                except websockets.exceptions.ConnectionClosed as e:
+                    logger.warning("=" * 70)
+                    logger.warning("⚠️  SONIOX CONNECTION CLOSED DURING RECEIVE")
+                    logger.warning("=" * 70)
+                    logger.warning(f"Close Code: {e.code if hasattr(e, 'code') else 'N/A'}")
+                    logger.warning(f"Close Reason: {e.reason if hasattr(e, 'reason') else 'N/A'}")
+                    logger.warning(f"Messages received before close: {message_count}")
+                    logger.warning("=" * 70)
+                    break
+
+                except json.JSONDecodeError as e:
+                    logger.error("=" * 70)
+                    logger.error("❌ JSON DECODE ERROR")
+                    logger.error("=" * 70)
+                    logger.error(f"Error: {e}")
+                    logger.error(f"Message that failed to parse: {message[:500] if 'message' in locals() else 'N/A'}")
+                    logger.error("=" * 70)
+                    continue
+
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error("=" * 70)
+                    logger.error("❌ ERROR IN SONIOX RECEIVE TASK")
+                    logger.error("=" * 70)
+                    logger.error(f"Error Type: {type(e).__name__}")
+                    logger.error(f"Error Message: {error_msg}")
+                    logger.error(f"Messages received before error: {message_count}")
+                    logger.exception("Full traceback:")
+                    logger.error("=" * 70)
+
+                    # Push ErrorFrame before breaking
+                    error_msg_lower = error_msg.lower()
+                    is_fatal = any(keyword in error_msg_lower for keyword in [
+                        'authentication', 'unauthorized', 'api key', 'quota', 'closed'
+                    ])
+
+                    await self.push_error(ErrorFrame(
+                        error=f"Soniox receive error: {error_msg[:200]}",
+                        fatal=is_fatal
+                    ))
+                    break
+
+        except asyncio.CancelledError:
+            logger.info(f"🛑 Receive task cancelled (received {message_count} messages)")
+            # Ensure connection is marked inactive
+            self._connection_active = False
+            # Close websocket if still open
+            if self._websocket:
+                try:
+                    await self._websocket.close()
+                    logger.debug("✅ WebSocket closed during task cancellation")
+                except Exception as e:
+                    logger.debug(f"Error closing websocket during cancellation: {e}")
+            raise
+        finally:
+            logger.info(f"🎧 Receive task handler stopped. Total messages received: {message_count}")
 
     async def _on_message(self, data: Dict):
         """Process incoming transcription message.
@@ -923,21 +950,32 @@ class SonioxSTTService(STTService):
 
     async def _async_handler(self, task_name):
         """Async handler for timeout management and false interim detection."""
-        while True:
-            await asyncio.sleep(0.1)
-            
-            current_time = time.time()
+        try:
+            while self._connection_active:
+                await asyncio.sleep(0.1)
 
-            # Check if we should send accumulated transcription due to timeout
-            if self._final_tokens and self._last_token_time:
-                elapsed = current_time - self._last_token_time
-                # If no new tokens for 800ms, consider it an endpoint
-                if elapsed > 0.8:
-                    logger.debug(f"🔚 Endpoint detected by timeout ({elapsed:.2f}s since last token)")
-                    await self._send_accumulated_transcription()
+                current_time = time.time()
 
-            await self._async_handle_accum_transcription(current_time)
-            await self._handle_false_interim(current_time)
+                # Check if we should send accumulated transcription due to timeout
+                if self._final_tokens and self._last_token_time:
+                    elapsed = current_time - self._last_token_time
+                    # If no new tokens for 800ms, consider it an endpoint
+                    if elapsed > 0.8:
+                        logger.debug(f"🔚 Endpoint detected by timeout ({elapsed:.2f}s since last token)")
+                        await self._send_accumulated_transcription()
+
+                await self._async_handle_accum_transcription(current_time)
+                await self._handle_false_interim(current_time)
+
+            logger.debug("🛑 Async handler exiting - connection no longer active")
+
+        except asyncio.CancelledError:
+            logger.debug("🛑 Async handler cancelled")
+            # Ensure connection is marked inactive
+            self._connection_active = False
+            raise
+        finally:
+            logger.debug("🛑 Async handler task completed")
 
     async def _fast_response_send_accum_transcriptions(self):
         """Send accumulated transcriptions immediately if fast response is enabled.
