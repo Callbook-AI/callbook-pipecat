@@ -588,22 +588,22 @@ class SonioxSTTService(STTService):
             logger.debug(f"📝 Final tokens accumulated: {len(self._final_tokens)}")
             logger.debug(f"📝 Non-final tokens: {len(non_final_tokens)}")
             logger.debug(f"📝 Combined text: '{combined_text}'")
-            
-            # Always send interim transcription to show progress
-            if combined_text.strip():
-                # Check if we should ignore this transcription
-                should_ignore = await self._should_ignore_transcription(combined_text)
-                if not should_ignore:
-                    # Send as interim (even finals are interim until endpoint detected)
-                    await self._on_interim_transcript_message(combined_text, self._language)
-            
-            # Check if we should send the final transcription now
-            # This happens when: no more non-finals AND we have finals
-            if has_final and len(non_final_tokens) == 0 and len(self._final_tokens) > 0:
-                # All tokens are final and no more non-finals coming - this is likely an endpoint
+
+            # Check if this is an endpoint (all final tokens, no non-finals)
+            is_endpoint = has_final and len(non_final_tokens) == 0 and len(self._final_tokens) > 0
+
+            if is_endpoint:
+                # This is an endpoint - send final transcription directly
+                # Do NOT send interim first to avoid duplicate transcriptions
                 logger.info("🔚 Detected endpoint (all final, no non-finals) - sending accumulated transcription")
                 await self._send_accumulated_transcription()
-            
+            else:
+                # Not an endpoint yet - send interim to show progress
+                if combined_text.strip():
+                    should_ignore = await self._should_ignore_transcription(combined_text)
+                    if not should_ignore:
+                        await self._on_interim_transcript_message(combined_text, self._language)
+
             logger.debug("=" * 70)
                 
         except Exception as e:
@@ -700,7 +700,11 @@ class SonioxSTTService(STTService):
         
         # Handle first message tracking AFTER duplicate check
         self._handle_first_message(transcript)
-        
+
+        # ALWAYS clear speech detection timer when sending final transcript
+        # This prevents the next audio chunk from thinking it's a new speech cycle
+        self._current_speech_start_time = None
+
         # CRITICAL: Send UserStoppedSpeakingFrame BEFORE the transcript
         # This ensures the aggregator's user_speaking state is cleared
         # before it receives the TranscriptionFrame
@@ -708,14 +712,13 @@ class SonioxSTTService(STTService):
             logger.info("⏸️  Sending UserStoppedSpeakingFrame BEFORE transcript")
             # Set state first
             self._user_speaking = False
-            self._current_speech_start_time = None
-            
+
             # Send UserStoppedSpeakingFrame in BOTH directions to ensure aggregator gets it
             logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
             logger.debug("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
             await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-            
+
             logger.info("✅ UserStoppedSpeakingFrame sent in both directions")
             # CRITICAL: Yield control to event loop to ensure the UserStoppedSpeakingFrame
             # is fully processed by the aggregator before we send the TranscriptionFrame.
@@ -724,6 +727,8 @@ class SonioxSTTService(STTService):
             # Increased delay from 0 to 0.05 to ensure proper processing order
             await asyncio.sleep(0.05)
             logger.info("✅ Yielded to event loop - aggregator state should be updated")
+        else:
+            logger.debug("ℹ️  User was not marked as speaking, but clearing speech timer anyway")
         
         # Create transcription frame
         frame = TranscriptionFrame(
