@@ -141,6 +141,7 @@ class SonioxSTTService(STTService):
         # Token accumulation (like the working example)
         self._final_tokens = []  # Accumulate final tokens until endpoint
         self._last_token_time = None
+        self._accum_sent = False  # Track if we've already sent accumulated transcriptions
 
         # First message tracking
         self._first_message = None
@@ -201,6 +202,7 @@ class SonioxSTTService(STTService):
         if self._current_speech_start_time is None:
             self._current_speech_start_time = time.perf_counter()
             self._audio_chunk_count = 0
+            self._accum_sent = False  # Reset send flag for new speech session
             logger.info("=" * 70)
             logger.info("🎤 SPEECH DETECTION STARTED")
             logger.info("=" * 70)
@@ -625,13 +627,18 @@ class SonioxSTTService(STTService):
 
     async def _send_accumulated_transcription(self):
         """Send accumulated final tokens as a complete TranscriptionFrame.
-        
+
         This is called when we detect an endpoint (no more tokens coming).
         """
         if not self._final_tokens:
             logger.debug("No accumulated tokens to send")
             return
-        
+
+        # Prevent duplicate sends during task cancellation cascades
+        if self._accum_sent:
+            logger.debug("⏭️ Skipping duplicate send of accumulated transcription")
+            return
+
         # Build final transcript from accumulated tokens, filtering out <end> tokens
         transcript = "".join(t["text"] for t in self._final_tokens if t["text"] != "<end>")
         
@@ -661,7 +668,10 @@ class SonioxSTTService(STTService):
         logger.info(f"📝 '{transcript}'")
         logger.info(f"🔤 Tokens: {len(self._final_tokens)}, Chars: {len(transcript)}")
         logger.info("=" * 70)
-        
+
+        # Mark as sent to prevent duplicates
+        self._accum_sent = True
+
         # Record performance
         self._record_stt_performance(transcript, self._final_tokens)
         

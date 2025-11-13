@@ -721,6 +721,7 @@ class DeepgramSTTService(STTService):
         self._last_time_accum_transcription = time.time()
         self._last_time_transcription = time.time()
         self._was_first_transcript_receipt = False
+        self._accum_sent = False  # Track if we've already sent accumulated transcriptions
 
         self.start_time = time.time()
         
@@ -1341,7 +1342,13 @@ class DeepgramSTTService(STTService):
 
         if not len(self._accum_transcription_frames): return
 
+        # Prevent duplicate sends during task cancellation cascades
+        if self._accum_sent:
+            logger.debug("⏭️ Skipping duplicate send of accumulated transcriptions")
+            return
+
         logger.debug("Sending accumulated transcriptions")
+        self._accum_sent = True  # Mark as sent
 
         await self._handle_user_speaking()
 
@@ -1726,6 +1733,7 @@ class DeepgramSTTService(STTService):
             # Reset timing when user starts speaking
             self._current_speech_start_time = time.perf_counter()
             self._audio_chunk_count = 0
+            self._accum_sent = False  # Reset send flag for new speech session
             logger.debug(f"⏱️ DeepgramSTTService: Speech timer reset - waiting for transcriptions")
         elif isinstance(frame, UserStoppedSpeakingFrame):
             logger.debug("🎤 DeepgramSTTService: User stopped speaking - finalizing connection")
