@@ -700,6 +700,10 @@ class DeepgramSTTService(STTService):
         self._error_count = 0
         self._on_connection_error = on_connection_error
 
+        # FIX: Add debouncing for error handling to prevent race conditions
+        self._reconnecting = False
+        self._reconnect_lock = asyncio.Lock()
+
         self._setup_sibling_deepgram()
 
 
@@ -1176,15 +1180,32 @@ class DeepgramSTTService(STTService):
                 await self.cancel_task(self._async_handler_task)
                 self._async_handler_task = None
 
-            if self._connection.is_connected:
-                logger.debug("Disconnecting from Deepgram")
+            # FIX: Check connection exists before checking is_connected to prevent AttributeError
+            if self._connection is not None:
                 try:
-                    await asyncio.wait_for(self._connection.finish(), timeout=0.1)
-                    logger.debug("Safe disconnect from Deepgram")
-                except asyncio.TimeoutError:
-                    logger.warning("Timeout while disconnecting from Deepgram.")
+                    if self._connection.is_connected:
+                        logger.debug("Disconnecting from Deepgram")
+                        try:
+                            await asyncio.wait_for(self._connection.finish(), timeout=0.5)
+                            logger.debug("Safe disconnect from Deepgram")
+                        except asyncio.TimeoutError:
+                            logger.warning("Timeout while disconnecting from Deepgram, forcing close")
+                            # Force close the websocket if timeout occurs
+                            if hasattr(self._connection, '_websocket') and self._connection._websocket:
+                                try:
+                                    await self._connection._websocket.close()
+                                except Exception as ws_close_err:
+                                    logger.debug(f"Error force-closing websocket: {ws_close_err}")
+                except Exception as e:
+                    logger.error(f"Error during connection cleanup: {e}")
+                finally:
+                    # Always clear the connection reference
+                    self._connection = None
         except Exception as e:
             logger.exception(f"{self} exception in _disconnect: {e}")
+        finally:
+            # Ensure connection is always cleared even if outer try fails
+            self._connection = None
 
     async def start_metrics(self):
         await self.start_ttfb_metrics()
@@ -1196,31 +1217,51 @@ class DeepgramSTTService(STTService):
         error: ErrorResponse = kwargs["error"]
         error_msg = str(error)
 
-        logger.warning(f"{self} connection error, will retry: {error_msg}")
-        await self.stop_all_metrics()
-        # NOTE(aleix): we don't disconnect (i.e. call finish on the connection)
-        # because this triggers more errors internally in the Deepgram SDK. So,
-        # we just forget about the previous connection and create a new one.
-        if self._error_count >= len(self.backup_api_keys):
-            logger.error(f"{self} too many connection errors, no more backup API keys available")
-
-            # Push ErrorFrame for monitoring - this is fatal
-            try:
-                await self.push_error(ErrorFrame(
-                    error=f"Deepgram fatal: Too many connection errors - {error_msg[:200]}",
-                    fatal=True
-                ))
-            except Exception as push_error:
-                logger.error(f"Failed to push Deepgram fatal error frame: {push_error}")
-
-            if self._on_connection_error:
-                self._on_connection_error(DeepgramFatalError(f"Too many connection errors: {error}"))
+        # FIX: Prevent concurrent error handling with debouncing
+        if self._reconnecting:
+            logger.debug(f"{self} already handling error, skipping duplicate")
             return
 
-        self._error_count += 1
-        self.api_key = self.backup_api_keys[self._error_count - 1]
-        logger.info(f"{self} switching to backup Deepgram API key: {self.api_key[:10]}...")
-        await self._connect()
+        async with self._reconnect_lock:
+            # Double-check after acquiring lock
+            if self._reconnecting:
+                logger.debug(f"{self} already reconnecting (after lock), skipping")
+                return
+
+            self._reconnecting = True
+            try:
+                logger.warning(f"{self} connection error, will retry: {error_msg}")
+                await self.stop_all_metrics()
+
+                # FIX: Explicitly disconnect old connection before creating new one
+                # This prevents connection leaks when switching to backup keys
+                logger.debug(f"{self} disconnecting old connection before retry")
+                await self._disconnect()
+
+                if self._error_count >= len(self.backup_api_keys):
+                    logger.error(f"{self} too many connection errors, no more backup API keys available")
+
+                    # Push ErrorFrame for monitoring - this is fatal
+                    try:
+                        await self.push_error(ErrorFrame(
+                            error=f"Deepgram fatal: Too many connection errors - {error_msg[:200]}",
+                            fatal=True
+                        ))
+                    except Exception as push_error:
+                        logger.error(f"Failed to push Deepgram fatal error frame: {push_error}")
+
+                    if self._on_connection_error:
+                        self._on_connection_error(DeepgramFatalError(f"Too many connection errors: {error}"))
+                    return
+
+                self._error_count += 1
+                self.api_key = self.backup_api_keys[self._error_count - 1]
+                logger.info(f"{self} switching to backup Deepgram API key: {self.api_key[:10]}...")
+                await self._connect()
+
+            finally:
+                # Always reset reconnecting flag
+                self._reconnecting = False
 
     async def _on_speech_started(self, *args, **kwargs):
         await self.start_metrics()
