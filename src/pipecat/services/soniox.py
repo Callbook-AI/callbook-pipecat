@@ -762,13 +762,21 @@ class SonioxSTTService(STTService):
         # This ensures we don't trigger false interim while receiving transcripts
         self._last_interim_time = time.time()
         
-        # Only trigger user speaking state if not already active AND VAD hasn't gone inactive
-        # This prevents repeated interim transcripts from re-triggering after VAD detected silence
-        if not self._user_speaking and not (self._vad_inactive_time and time.time() - self._vad_inactive_time < 2.0):
-            logger.info("👤 First interim - triggering user speaking state...")
-            await self._handle_user_speaking()
-        elif self._vad_inactive_time and time.time() - self._vad_inactive_time < 2.0:
-            logger.debug(f"⚠️  Skipping user speaking trigger - VAD went inactive {time.time() - self._vad_inactive_time:.2f}s ago")
+        # Trigger user speaking state with priority for bot interruptions
+        # If bot is speaking, ALWAYS trigger interruption to catch short words/utterances
+        # If bot is NOT speaking, use VAD timing to avoid false triggers
+        if not self._user_speaking:
+            if self._bot_speaking and self._allow_stt_interruptions:
+                # Bot is speaking - prioritize interruption regardless of VAD timing
+                # This ensures short words like "Sí" properly interrupt the bot
+                logger.info("👤 Bot speaking - triggering interruption from user speech...")
+                await self._handle_user_speaking()
+            elif not (self._vad_inactive_time and time.time() - self._vad_inactive_time < 2.0):
+                # Bot not speaking - use VAD timing to avoid false triggers
+                logger.info("👤 First interim - triggering user speaking state...")
+                await self._handle_user_speaking()
+            else:
+                logger.debug(f"⚠️  Skipping user speaking trigger - VAD went inactive {time.time() - self._vad_inactive_time:.2f}s ago")
         
         frame = InterimTranscriptionFrame(
             transcript,
