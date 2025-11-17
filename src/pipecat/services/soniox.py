@@ -198,20 +198,25 @@ class SonioxSTTService(STTService):
             yield None
             return
 
-        if self._current_speech_start_time is None:
+        # Don't start new speech detection if bot is speaking (prevents echo/noise false triggers)
+        if self._current_speech_start_time is None and not self._bot_speaking:
             self._current_speech_start_time = time.perf_counter()
             self._audio_chunk_count = 0
             logger.info("=" * 70)
             logger.info("🎤 SPEECH DETECTION STARTED")
             logger.info("=" * 70)
+        elif self._current_speech_start_time is None and self._bot_speaking:
+            logger.debug(f"⚠️  Ignoring audio while bot is speaking (prevents false speech detection)")
 
-        self._audio_chunk_count += 1
-        self._last_audio_chunk_time = time.time()
+        # Only track audio chunks if we have an active speech detection cycle
+        if self._current_speech_start_time is not None:
+            self._audio_chunk_count += 1
+            self._last_audio_chunk_time = time.time()
 
-        # Log every 50 chunks to avoid spam
-        if self._audio_chunk_count % 50 == 0:
-            elapsed = time.perf_counter() - self._current_speech_start_time
-            logger.debug(f"🎤 Audio streaming: {self._audio_chunk_count} chunks sent ({elapsed:.2f}s elapsed)")
+            # Log every 50 chunks to avoid spam
+            if self._audio_chunk_count % 50 == 0:
+                elapsed = time.perf_counter() - self._current_speech_start_time
+                logger.debug(f"🎤 Audio streaming: {self._audio_chunk_count} chunks sent ({elapsed:.2f}s elapsed)")
 
         try:
             # logger.debug(f"📤 Sending audio chunk #{self._audio_chunk_count} ({len(audio)} bytes)")
