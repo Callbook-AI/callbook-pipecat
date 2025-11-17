@@ -205,8 +205,8 @@ class SonioxSTTService(STTService):
             logger.info("=" * 70)
             logger.info("🎤 SPEECH DETECTION STARTED")
             logger.info("=" * 70)
-        elif self._current_speech_start_time is None and self._bot_speaking:
-            logger.debug(f"⚠️  Ignoring audio while bot is speaking (prevents false speech detection)")
+        # elif self._current_speech_start_time is None and self._bot_speaking:
+        #     logger.debug(f"⚠️  Ignoring audio while bot is speaking (prevents false speech detection)")
 
         # Only track audio chunks if we have an active speech detection cycle
         if self._current_speech_start_time is not None:
