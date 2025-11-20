@@ -75,7 +75,7 @@ class SonioxSTTService(STTService):
         language_hints: List[str] = ["es"]
         audio_format: str = "pcm_s16le"  # PCM 16-bit little-endian for best latency
         num_channels: int = 1  # Number of audio channels (1 for mono, 2 for stereo) - MUST match Soniox API
-        enable_speaker_diarization: bool = False
+        enable_speaker_diarization: bool = True
         enable_language_identification: bool = False
         allow_interruptions: bool = True
         detect_voicemail: bool = True
@@ -141,6 +141,7 @@ class SonioxSTTService(STTService):
         # Token accumulation (like the working example)
         self._final_tokens = []  # Accumulate final tokens until endpoint
         self._last_token_time = None
+        self._last_any_token_time = None  # Track ANY token to prevent premature timeout
 
         # First message tracking
         self._first_message = None
@@ -592,13 +593,16 @@ class SonioxSTTService(STTService):
 
             non_final_tokens = []
             has_final = False
-            
+
             # Separate final vs non-final tokens (like working example)
             for token in tokens:
                 text = token.get("text", "")
                 if not text or text == "<end>":  # Skip empty and <end> tokens
                     continue
-                    
+
+                # Track ANY token to prevent premature timeout while user is speaking
+                self._last_any_token_time = time.time()
+
                 if token.get("is_final"):
                     # Final token - add to accumulation buffer
                     self._final_tokens.append(token)
@@ -681,6 +685,7 @@ class SonioxSTTService(STTService):
             # Clear accumulated tokens for next utterance
             self._final_tokens = []
             self._last_token_time = None
+            self._last_any_token_time = None
             return
         
         logger.info("=" * 70)
@@ -699,6 +704,7 @@ class SonioxSTTService(STTService):
         # Clear accumulated tokens for next utterance
         self._final_tokens = []
         self._last_token_time = None
+        self._last_any_token_time = None
         self._last_final_transcript_time = time.time()
         self._last_time_transcription = time.time()
 
@@ -1017,11 +1023,13 @@ class SonioxSTTService(STTService):
                 current_time = time.time()
 
                 # Check if we should send accumulated transcription due to timeout
-                if self._final_tokens and self._last_token_time:
-                    elapsed = current_time - self._last_token_time
-                    # If no new tokens for 800ms, consider it an endpoint
+                # Use _last_any_token_time to check if user is still speaking (non-finals arriving)
+                # Only timeout if NO tokens (final or non-final) have arrived recently
+                if self._final_tokens and self._last_any_token_time:
+                    elapsed = current_time - self._last_any_token_time
+                    # If no new tokens at all for 800ms, consider it an endpoint
                     if elapsed > 0.8:
-                        logger.debug(f"🔚 Endpoint detected by timeout ({elapsed:.2f}s since last token)")
+                        logger.debug(f"🔚 Endpoint detected by timeout ({elapsed:.2f}s since last ANY token)")
                         await self._send_accumulated_transcription()
 
                 await self._async_handle_accum_transcription(current_time)
