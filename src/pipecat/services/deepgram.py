@@ -1241,17 +1241,25 @@ class DeepgramSTTService(STTService):
                 if self._error_count >= len(self.backup_api_keys):
                     logger.error(f"{self} too many connection errors, no more backup API keys available")
 
-                    # Push ErrorFrame for monitoring - this is fatal
+                    # Check if Gladia backup is available
+                    if self._backup_enabled and self._intelligent_gladia_backup:
+                        logger.warning(f"{self} Deepgram failed but Gladia backup is available - continuing with backup only")
+                        # Don't push fatal error - Gladia will handle transcriptions
+                        return
+
+                    # No STT service available - this is fatal
+                    logger.error(f"{self} NO STT SERVICE AVAILABLE - Deepgram failed and no Gladia backup configured")
+
                     try:
                         await self.push_error(ErrorFrame(
-                            error=f"Deepgram fatal: Too many connection errors - {error_msg[:200]}",
+                            error=f"STT fatal: No STT service available - Deepgram failed ({error_msg[:150]}), no backup configured",
                             fatal=True
                         ))
                     except Exception as push_error:
-                        logger.error(f"Failed to push Deepgram fatal error frame: {push_error}")
+                        logger.error(f"Failed to push STT fatal error frame: {push_error}")
 
                     if self._on_connection_error:
-                        self._on_connection_error(DeepgramFatalError(f"Too many connection errors: {error}"))
+                        self._on_connection_error(DeepgramFatalError(f"No STT service available: {error}"))
                     return
 
                 self._error_count += 1

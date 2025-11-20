@@ -538,8 +538,31 @@ class SonioxSTTService(STTService):
             
             # Check for error response
             if "error_code" in data:
-                logger.error(f"❌ Soniox error: {data.get('error_code')} - {data.get('error_message')}")
-                await self.push_error(ErrorFrame(f"Soniox error: {data.get('error_message')}"))
+                error_code = data.get('error_code')
+                error_message = data.get('error_message', '')
+                error_msg_lower = error_message.lower()
+
+                # Determine if error is fatal (auth, quota, billing issues)
+                # Error codes: 401/403 = auth, 402 = payment, 429 = rate limit
+                # 408 = timeout (non-fatal), 500 = server error (non-fatal)
+                is_fatal = (
+                    error_code in [401, 402, 403, 429] or
+                    any(keyword in error_msg_lower for keyword in [
+                        'authentication', 'unauthorized', 'api key', 'invalid key',
+                        'quota', 'insufficient', 'subscription', 'billing', 'payment'
+                    ])
+                )
+
+                if is_fatal:
+                    # Only send alerts for fatal errors
+                    logger.error(f"❌ Soniox FATAL error {error_code}: {error_message}")
+                    await self.push_error(ErrorFrame(
+                        error=f"Soniox error: {error_message}",
+                        fatal=True
+                    ))
+                else:
+                    # Non-fatal errors just logged, no alert
+                    logger.warning(f"⚠️ Soniox non-fatal error {error_code}: {error_message}")
                 return
             
             # Check for finished response
