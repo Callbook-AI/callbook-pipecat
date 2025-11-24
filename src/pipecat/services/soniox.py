@@ -79,7 +79,6 @@ class SonioxSTTService(STTService):
         enable_language_identification: bool = False
         allow_interruptions: bool = True
         detect_voicemail: bool = True
-        fast_response: bool = False
         on_no_punctuation_seconds: float = DEFAULT_ON_NO_PUNCTUATION_SECONDS
         context: Optional[str] = None  # Optional context for better accuracy
 
@@ -108,8 +107,6 @@ class SonioxSTTService(STTService):
             params = self.InputParams()
             if language is not None:
                 params.language = language
-            if enable_partials is not None:
-                params.fast_response = enable_partials
             if allow_interruptions is not None:
                 params.allow_interruptions = allow_interruptions
 
@@ -117,7 +114,6 @@ class SonioxSTTService(STTService):
         self._language = params.language
         self._allow_stt_interruptions = params.allow_interruptions
         self.detect_voicemail = params.detect_voicemail
-        self._fast_response = params.fast_response
         self._on_no_punctuation_seconds = params.on_no_punctuation_seconds
 
         # State tracking (following Deepgram pattern)
@@ -137,7 +133,7 @@ class SonioxSTTService(STTService):
         # Transcript tracking
         self._last_interim_time = None
         self._last_sent_transcript = None
-        
+
         # Token accumulation (like the working example)
         self._final_tokens = []  # Accumulate final tokens until endpoint
         self._last_token_time = None
@@ -148,13 +144,17 @@ class SonioxSTTService(STTService):
         self._first_message_time = None
         self._was_first_transcript_receipt = False
 
+        # Transcript accumulation (Deepgram compatibility)
+        self._accum_transcription_frames = []  # Accumulate TranscriptionFrame objects
+        self._last_time_accum_transcription = time.time()
+
         self.start_time = time.time()
         self._last_time_transcription = time.time()
 
         logger.info("Soniox STT Service initialized (Deepgram-optimized):")
         logger.info(f"  Model: {params.model}, Language: {params.language.value}")
         logger.info(f"  Allow interruptions: {self._allow_stt_interruptions}")
-        logger.info(f"  Fast response: {self._fast_response}, Detect voicemail: {self.detect_voicemail}")
+        logger.info(f"  Detect voicemail: {self.detect_voicemail}")
         logger.info(f"  No punctuation timeout: {self._on_no_punctuation_seconds}s")
 
     def can_generate_metrics(self) -> bool:
@@ -522,12 +522,149 @@ class SonioxSTTService(STTService):
         finally:
             logger.info(f"🎧 Receive task handler stopped. Total messages received: {message_count}")
 
+    def _is_fatal_error(self, error_code: int, error_message: str) -> bool:
+        """Determine if an error is fatal based on code and message."""
+        fatal_codes = [401, 402, 403, 429]
+        fatal_keywords = [
+            'authentication', 'unauthorized', 'api key', 'invalid key',
+            'quota', 'insufficient', 'subscription', 'billing', 'payment'
+        ]
+
+        return (
+            error_code in fatal_codes or
+            any(keyword in error_message.lower() for keyword in fatal_keywords)
+        )
+
+    async def _handle_error_response(self, data: Dict) -> bool:
+        """Handle error responses from Soniox API.
+
+        Returns:
+            True if an error was handled, False otherwise
+        """
+        if "error_code" not in data:
+            return False
+
+        error_code = data.get('error_code')
+        error_message = data.get('error_message', '')
+        is_fatal = self._is_fatal_error(error_code, error_message)
+
+        if is_fatal:
+            logger.error(f"❌ Soniox FATAL error {error_code}: {error_message}")
+            await self.push_error(ErrorFrame(
+                error=f"Soniox error: {error_message}",
+                fatal=True
+            ))
+        else:
+            logger.warning(f"⚠️ Soniox non-fatal error {error_code}: {error_message}")
+
+        return True
+
+    async def _handle_session_finished(self, data: Dict) -> bool:
+        """Handle session finished response.
+
+        Returns:
+            True if session finished, False otherwise
+        """
+        if not data.get("finished"):
+            return False
+
+        logger.info("✅ Soniox session finished")
+        await self._send_accumulated_tokens()
+        return True
+
+    async def _check_token_gap_endpoint(self):
+        """Check if token gap indicates an endpoint and send if needed."""
+        if not self._final_tokens:
+            return
+
+        elapsed_since_last_token = time.time() - (self._last_token_time or 0)
+        if elapsed_since_last_token > 0.5:  # 500ms gap indicates endpoint
+            logger.info("🔚 Detected endpoint (token gap) - sending accumulated tokens")
+            await self._send_accumulated_tokens()
+
+    def _separate_tokens(self, tokens: List[Dict]) -> tuple[List[Dict], bool]:
+        """Separate tokens into final and non-final, filtering out empty/end tokens.
+
+        Returns:
+            Tuple of (non_final_tokens, has_final)
+        """
+        non_final_tokens = []
+        has_final = False
+
+        for token in tokens:
+            text = token.get("text", "")
+            if not text or text == "<end>":
+                continue
+
+            # Track ANY token to prevent premature timeout
+            self._last_any_token_time = time.time()
+
+            if token.get("is_final"):
+                self._final_tokens.append(token)
+                has_final = True
+                self._last_token_time = time.time()
+            else:
+                non_final_tokens.append(token)
+
+        return non_final_tokens, has_final
+
+    def _build_transcript_texts(self, non_final_tokens: List[Dict]) -> tuple[str, str, str]:
+        """Build final, non-final, and combined transcript texts.
+
+        Returns:
+            Tuple of (final_text, non_final_text, combined_text)
+        """
+        final_text = "".join(t["text"] for t in self._final_tokens)
+        non_final_text = "".join(t["text"] for t in non_final_tokens)
+        combined_text = final_text + non_final_text
+
+        return final_text, non_final_text, combined_text
+
+    async def _process_tokens(self, tokens: List[Dict]):
+        """Process tokens and determine whether to send final or interim transcript."""
+        non_final_tokens, has_final = self._separate_tokens(tokens)
+        final_text, non_final_text, combined_text = self._build_transcript_texts(non_final_tokens)
+
+        logger.debug(f"📝 Final tokens accumulated: {len(self._final_tokens)}")
+        logger.debug(f"📝 Non-final tokens: {len(non_final_tokens)}")
+        logger.debug(f"📝 Combined text: '{combined_text}'")
+
+        # Check if this is an endpoint (all final tokens, no non-finals)
+        is_endpoint = has_final and len(non_final_tokens) == 0 and len(self._final_tokens) > 0
+
+        if is_endpoint:
+            logger.info("🔚 Detected endpoint (all final, no non-finals) - sending accumulated tokens")
+            await self._send_accumulated_tokens()
+        elif combined_text.strip():
+            # CRITICAL: Check for voicemail FIRST, before any filtering
+            # Voicemail messages often come when VAD is inactive (pre-recorded)
+            # so they need priority over VAD-based filtering
+            if await self._detect_and_handle_voicemail(combined_text):
+                logger.info("🔊 Voicemail detected in interim tokens - returning early")
+                return
+
+            # Calculate average confidence for interims
+            all_tokens = self._final_tokens + non_final_tokens
+            confidence = sum(t.get("confidence", 1.0) for t in all_tokens) / len(all_tokens) if all_tokens else 1.0
+
+            # Get time_start from first token if available
+            time_start = all_tokens[0].get("start", 0) if all_tokens else 0
+
+            should_ignore = await self._should_ignore_transcription(
+                combined_text,
+                is_final=False,  # This is an interim (not endpoint)
+                confidence=confidence,
+                time_start=time_start
+            )
+            if not should_ignore:
+                await self._on_interim_transcript_message(combined_text, self._language)
+
     async def _on_message(self, data: Dict):
         """Process incoming transcription message.
-        
+
         Following the working example pattern:
         - Accumulate final tokens until endpoint is detected
-        - Send non-final tokens as interim immediately  
+        - Send non-final tokens as interim immediately
         - Only send TranscriptionFrame when we detect endpoint (gap in tokens or explicit signal)
         """
         try:
@@ -536,108 +673,31 @@ class SonioxSTTService(STTService):
             logger.debug("=" * 70)
             logger.debug(f"Message keys: {list(data.keys())}")
             logger.debug(f"Full message data: {json.dumps(data, indent=2)}")
-            
-            # Check for error response
-            if "error_code" in data:
-                error_code = data.get('error_code')
-                error_message = data.get('error_message', '')
-                error_msg_lower = error_message.lower()
 
-                # Determine if error is fatal (auth, quota, billing issues)
-                # Error codes: 401/403 = auth, 402 = payment, 429 = rate limit
-                # 408 = timeout (non-fatal), 500 = server error (non-fatal)
-                is_fatal = (
-                    error_code in [401, 402, 403, 429] or
-                    any(keyword in error_msg_lower for keyword in [
-                        'authentication', 'unauthorized', 'api key', 'invalid key',
-                        'quota', 'insufficient', 'subscription', 'billing', 'payment'
-                    ])
-                )
+            # Handle error responses
+            if await self._handle_error_response(data):
+                return
 
-                if is_fatal:
-                    # Only send alerts for fatal errors
-                    logger.error(f"❌ Soniox FATAL error {error_code}: {error_message}")
-                    await self.push_error(ErrorFrame(
-                        error=f"Soniox error: {error_message}",
-                        fatal=True
-                    ))
-                else:
-                    # Non-fatal errors just logged, no alert
-                    logger.warning(f"⚠️ Soniox non-fatal error {error_code}: {error_message}")
+            # Handle session finished
+            if await self._handle_session_finished(data):
                 return
-            
-            # Check for finished response
-            if data.get("finished"):
-                logger.info("✅ Soniox session finished")
-                # Send any remaining final tokens before finishing
-                await self._send_accumulated_transcription()
-                return
-            
+
             await self.stop_ttfb_metrics()
 
-            # Parse tokens from current response (like working example)
+            # Parse and validate tokens
             tokens = data.get("tokens", [])
             logger.debug(f"📝 Tokens count: {len(tokens)}")
-            
+
             if not tokens:
-                # No tokens in this message - might indicate endpoint
-                # Check if we have accumulated finals that haven't been sent
-                if self._final_tokens:
-                    elapsed_since_last_token = time.time() - (self._last_token_time or 0)
-                    if elapsed_since_last_token > 0.5:  # 500ms gap indicates endpoint
-                        logger.info("🔚 Detected endpoint (token gap) - sending accumulated transcription")
-                        await self._send_accumulated_transcription()
+                await self._check_token_gap_endpoint()
                 logger.debug("⚠️  No tokens in message, skipping")
                 logger.debug("=" * 70)
                 return
 
-            non_final_tokens = []
-            has_final = False
-
-            # Separate final vs non-final tokens (like working example)
-            for token in tokens:
-                text = token.get("text", "")
-                if not text or text == "<end>":  # Skip empty and <end> tokens
-                    continue
-
-                # Track ANY token to prevent premature timeout while user is speaking
-                self._last_any_token_time = time.time()
-
-                if token.get("is_final"):
-                    # Final token - add to accumulation buffer
-                    self._final_tokens.append(token)
-                    has_final = True
-                    self._last_token_time = time.time()
-                else:
-                    # Non-final token - will be sent as interim
-                    non_final_tokens.append(token)
-            
-            # Build texts for interim display (already filtered <end> tokens above)
-            final_text = "".join(t["text"] for t in self._final_tokens)
-            non_final_text = "".join(t["text"] for t in non_final_tokens)
-            combined_text = final_text + non_final_text
-            
-            logger.debug(f"📝 Final tokens accumulated: {len(self._final_tokens)}")
-            logger.debug(f"📝 Non-final tokens: {len(non_final_tokens)}")
-            logger.debug(f"📝 Combined text: '{combined_text}'")
-
-            # Check if this is an endpoint (all final tokens, no non-finals)
-            is_endpoint = has_final and len(non_final_tokens) == 0 and len(self._final_tokens) > 0
-
-            if is_endpoint:
-                # This is an endpoint - send final transcription directly
-                # Do NOT send interim first to avoid duplicate transcriptions
-                logger.info("🔚 Detected endpoint (all final, no non-finals) - sending accumulated transcription")
-                await self._send_accumulated_transcription()
-            else:
-                # Not an endpoint yet - send interim to show progress
-                if combined_text.strip():
-                    should_ignore = await self._should_ignore_transcription(combined_text)
-                    if not should_ignore:
-                        await self._on_interim_transcript_message(combined_text, self._language)
-
+            # Process tokens
+            await self._process_tokens(tokens)
             logger.debug("=" * 70)
-                
+
         except Exception as e:
             error_msg = str(e)
             logger.error("=" * 70)
@@ -655,52 +715,120 @@ class SonioxSTTService(STTService):
                 fatal=False
             ))
 
-    async def _send_accumulated_transcription(self):
+    def _is_accum_transcription(self, text: str) -> bool:
+        """Check if text should be accumulated (doesn't end with phrase-ending punctuation).
+
+        Deepgram compatibility: Matches Deepgram's logic for accumulation.
+        """
+        END_OF_PHRASE_CHARACTERS = ['.', '?']
+
+        text = text.strip()
+        if not text:
+            return True
+
+        return text[-1] not in END_OF_PHRASE_CHARACTERS
+
+    def _append_accum_transcription(self, frame: TranscriptionFrame):
+        """Append a TranscriptionFrame to the accumulation buffer.
+
+        Deepgram compatibility: Matches Deepgram's accumulation pattern.
+        """
+        self._last_time_accum_transcription = time.time()
+        self._accum_transcription_frames.append(frame)
+        logger.debug(f"📝 Accumulated transcript: '{frame.text}' (total frames: {len(self._accum_transcription_frames)})")
+
+    async def _send_accum_transcriptions(self):
+        """Send all accumulated transcription frames followed by UserStoppedSpeakingFrame.
+
+        Deepgram compatibility: This is the critical method that sends frames in the correct order:
+        1. All accumulated TranscriptionFrames
+        2. UserStoppedSpeakingFrame (to signal end of user speech)
+        """
+        if not len(self._accum_transcription_frames):
+            logger.debug("No accumulated transcriptions to send")
+            return
+
+        logger.info("=" * 70)
+        logger.info("📤 SENDING ACCUMULATED TRANSCRIPTIONS")
+        logger.info(f"   Frame count: {len(self._accum_transcription_frames)}")
+        logger.info("=" * 70)
+
+        await self._handle_user_speaking()
+
+        # Send all accumulated transcription frames
+        for frame in self._accum_transcription_frames:
+            logger.debug(f"📤 Sending accumulated frame: '{frame.text}'")
+            await self.push_frame(frame)
+
+        self._accum_transcription_frames = []
+
+        # Send UserStoppedSpeakingFrame AFTER transcripts (critical for aggregator)
+        await self._handle_user_silence()
+        await self.stop_processing_metrics()
+
+        logger.info("✅ All accumulated transcriptions sent")
+        logger.info("=" * 70)
+
+    async def _send_accumulated_tokens(self):
         """Send accumulated final tokens as a complete TranscriptionFrame.
-        
+
+        Soniox-specific: Converts Soniox tokens to transcript text and sends via
+        _on_final_transcript_message(), which will then accumulate into frames and
+        eventually send via _send_accum_transcriptions().
+
         This is called when we detect an endpoint (no more tokens coming).
         """
         if not self._final_tokens:
             logger.debug("No accumulated tokens to send")
             return
-        
+
         # Build final transcript from accumulated tokens, filtering out <end> tokens
         transcript = "".join(t["text"] for t in self._final_tokens if t["text"] != "<end>")
-        
+
         if not transcript.strip():
             logger.debug("Empty accumulated transcript, skipping")
             self._final_tokens = []
             return
-        
-        # CRITICAL: Check if we should ignore this transcription (e.g., bot speaking with interruptions disabled)
-        should_ignore = await self._should_ignore_transcription(transcript)
+
+        # Calculate confidence and time_start for filtering
+        confidence = sum(t.get("confidence", 1.0) for t in self._final_tokens) / len(self._final_tokens) if self._final_tokens else 1.0
+        time_start = self._final_tokens[0].get("start", 0) if self._final_tokens else 0
+
+        # CRITICAL: Check if we should ignore this transcription
+        should_ignore = await self._should_ignore_transcription(
+            transcript,
+            is_final=True,
+            confidence=confidence,
+            time_start=time_start
+        )
         if should_ignore:
             logger.info("=" * 70)
             logger.info("🚫 IGNORING ACCUMULATED FINAL TRANSCRIPT")
             logger.info("=" * 70)
             logger.info(f"📝 '{transcript}'")
             logger.info(f"🔤 Tokens: {len(self._final_tokens)}, Chars: {len(transcript)}")
-            logger.info(f"❌ Reason: Bot speaking and interruptions disabled")
+            logger.info(f"🎯 Confidence: {confidence:.2f}")
             logger.info("=" * 70)
             # Clear accumulated tokens for next utterance
             self._final_tokens = []
             self._last_token_time = None
             self._last_any_token_time = None
             return
-        
+
         logger.info("=" * 70)
         logger.info("✅ SENDING ACCUMULATED FINAL TRANSCRIPT")
         logger.info("=" * 70)
         logger.info(f"📝 '{transcript}'")
         logger.info(f"🔤 Tokens: {len(self._final_tokens)}, Chars: {len(transcript)}")
+        logger.info(f"🎯 Confidence: {confidence:.2f}")
         logger.info("=" * 70)
-        
+
         # Record performance
         self._record_stt_performance(transcript, self._final_tokens)
-        
-        # Send the final transcription
+
+        # Send the final transcription (will accumulate and send via _send_accum_transcriptions)
         await self._on_final_transcript_message(transcript, self._language)
-        
+
         # Clear accumulated tokens for next utterance
         self._final_tokens = []
         self._last_token_time = None
@@ -708,62 +836,32 @@ class SonioxSTTService(STTService):
         self._last_final_transcript_time = time.time()
         self._last_time_transcription = time.time()
 
-    async def _on_final_transcript_message(self, transcript: str, language: Language):
-        """Handle final transcript - user has FINISHED speaking.
-        
-        CRITICAL: We send UserStoppedSpeakingFrame BEFORE the TranscriptionFrame.
-        This ensures the aggregator receives them in the correct order:
-        1. UserStoppedSpeakingFrame clears aggregator's user_speaking state
-        2. TranscriptionFrame is received and processed immediately (not buffered)
-        
-        This ordering is essential because the aggregator checks user_speaking state
-        when it receives the transcript. If user_speaking=True, it buffers. If False,
-        it processes immediately.
+    async def _on_final_transcript_message(self, transcript: str, language: Language, speech_final: bool = True):
+        """Handle final transcript - accumulate and send when appropriate.
+
+        Deepgram compatibility: This now matches Deepgram's pattern exactly:
+        1. Check for voicemail (early return if detected)
+        2. Trigger user speaking state
+        3. Create TranscriptionFrame and accumulate it
+        4. Handle first message tracking
+        5. Check if we should send accumulated frames based on punctuation or speech_final
+        6. _send_accum_transcriptions() will send frames + UserStoppedSpeakingFrame in correct order
         """
         logger.debug("🔵 Processing final transcript...")
-        
-        # Check for voicemail detection
-        if self.detect_voicemail:
-            logger.debug("🔍 Checking for voicemail...")
-            await self._detect_and_handle_voicemail(transcript)
-        
-        # Check for repeated first message BEFORE setting first message
+
+        # Check for voicemail detection first (Deepgram does this early)
+        if await self._detect_and_handle_voicemail(transcript):
+            logger.info("🔊 Voicemail detected and handled - returning early")
+            return
+
+        # Check for repeated first message BEFORE proceeding
         if self._should_ignore_first_repeated_message(transcript):
             logger.debug(f"⏭️  Ignoring repeated first message: '{transcript}'")
             return
-        
-        # Handle first message tracking AFTER duplicate check
-        self._handle_first_message(transcript)
 
-        # ALWAYS clear speech detection timer when sending final transcript
-        # This prevents the next audio chunk from thinking it's a new speech cycle
-        self._current_speech_start_time = None
+        # Trigger user speaking if not already active
+        await self._handle_user_speaking()
 
-        # CRITICAL: Send UserStoppedSpeakingFrame BEFORE the transcript
-        # This ensures the aggregator's user_speaking state is cleared
-        # before it receives the TranscriptionFrame
-        if self._user_speaking:
-            logger.info("⏸️  Sending UserStoppedSpeakingFrame BEFORE transcript")
-            # Set state first
-            self._user_speaking = False
-
-            # Send UserStoppedSpeakingFrame in BOTH directions to ensure aggregator gets it
-            logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
-            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
-            logger.debug("⬇️  Pushing UserStoppedSpeakingFrame DOWNSTREAM")
-            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-
-            logger.info("✅ UserStoppedSpeakingFrame sent in both directions")
-            # CRITICAL: Yield control to event loop to ensure the UserStoppedSpeakingFrame
-            # is fully processed by the aggregator before we send the TranscriptionFrame.
-            # Without this, both frames may be queued simultaneously and processed in
-            # the wrong order due to asyncio task scheduling.
-            # Increased delay from 0 to 0.05 to ensure proper processing order
-            await asyncio.sleep(0.05)
-            logger.info("✅ Yielded to event loop - aggregator state should be updated")
-        else:
-            logger.debug("ℹ️  User was not marked as speaking, but clearing speech timer anyway")
-        
         # Create transcription frame
         frame = TranscriptionFrame(
             transcript,
@@ -772,59 +870,38 @@ class SonioxSTTService(STTService):
             language
         )
         logger.debug(f"📦 Created TranscriptionFrame: '{transcript}'")
-        
-        # Send the TranscriptionFrame - aggregator will process it immediately
-        logger.info("=" * 70)
-        logger.info("⬇️  SENDING FINAL TRANSCRIPTION TO AGGREGATOR")
-        logger.info(f"   Text: '{transcript}'")
-        logger.info(f"   User speaking: {self._user_speaking} (should be False)")
-        logger.info("=" * 70)
-        await self.push_frame(frame, FrameDirection.DOWNSTREAM)
-        logger.info("✅ TranscriptionFrame sent DOWNSTREAM")
-        
-        await self.stop_processing_metrics()
+
+        # Handle first message tracking
+        self._handle_first_message(frame.text)
+
+        # Accumulate the frame (Deepgram pattern)
+        self._append_accum_transcription(frame)
+        self._was_first_transcript_receipt = True
+
+        # ALWAYS clear speech detection timer when processing final transcript
+        self._current_speech_start_time = None
+
+        # Fast response mode is always active - check if should send now
+        logger.debug("🚀 Fast response mode - checking if should send now")
+        await self._fast_response_send_accum_transcriptions()
 
     async def _on_interim_transcript_message(self, transcript: str, language: Language):
         """Handle interim transcript.
-        
-        Shows real-time progress. Triggers user_speaking state ONLY on first call.
-        Both non-final tokens AND accumulated finals (before endpoint) are sent as interim.
+
+        Deepgram compatibility: Simplified to match Deepgram's pattern.
+        Shows real-time progress and triggers user_speaking state.
+
+        Note: Voicemail detection is handled in _process_tokens before this is called.
         """
         logger.debug(f"🟡 Interim: '{transcript[:50]}...' ({len(transcript)} chars)")
-        
-        # Update interim time for false interim detection
-        # This ensures we don't trigger false interim while receiving transcripts
-        self._last_interim_time = time.time()
-        
-        # IGNORE single-word interruptions when bot is speaking (same as Deepgram)
-        # This prevents false interruptions from short utterances like "Sí", "Ok", etc.
-        if self._bot_speaking and self._transcript_words_count(transcript) == 1:
-            logger.debug(f"⚠️  Ignoring single-word interim while bot speaking: '{transcript}'")
-            # Still send the interim frame downstream but don't trigger interruption
-            frame = InterimTranscriptionFrame(
-                transcript,
-                "",
-                time_now_iso8601(),
-                language
-            )
-            await self.push_frame(frame, FrameDirection.DOWNSTREAM)
-            return
 
-        # Trigger user speaking based on context
-        # If bot is speaking: ALWAYS interrupt with multi-word transcript (already passed single-word check)
-        # If bot NOT speaking: use VAD timing to avoid false triggers
-        if not self._user_speaking:
-            # Bot speaking case: ignore VAD timing, trust the transcription
-            if self._bot_speaking:
-                logger.info("👤 Bot speaking - triggering interruption with multi-word transcript...")
-                await self._handle_user_speaking()
-            # Bot not speaking case: check VAD timing to avoid stale transcripts
-            elif not (self._vad_inactive_time and time.time() - self._vad_inactive_time < 2.0):
-                logger.info("👤 First interim - triggering user speaking state...")
-                await self._handle_user_speaking()
-            else:
-                logger.debug(f"⚠️  Skipping user speaking trigger - VAD went inactive {time.time() - self._vad_inactive_time:.2f}s ago")
-        
+        # Update interim time for false interim detection
+        self._last_interim_time = time.time()
+
+        # Trigger user speaking (Deepgram always does this for interims)
+        await self._handle_user_speaking()
+
+        # Send interim frame
         frame = InterimTranscriptionFrame(
             transcript,
             "",
@@ -832,6 +909,7 @@ class SonioxSTTService(STTService):
             language
         )
         await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+        logger.trace(f"📤 Sent InterimTranscriptionFrame: '{transcript[:30]}...'")
 
     def _record_stt_performance(self, transcript, tokens):
         """Record STT performance metrics."""
@@ -847,35 +925,50 @@ class SonioxSTTService(STTService):
             self._current_speech_start_time = None
 
     async def _handle_user_speaking(self):
-        """Handle user started speaking event."""
-        if not self._user_speaking:
-            logger.info("=" * 70)
-            logger.info("👤 USER STARTED SPEAKING")
-            logger.info("=" * 70)
-            logger.debug("⬆️  Pushing StartInterruptionFrame")
-            await self.push_frame(StartInterruptionFrame())
-            self._user_speaking = True
-            logger.debug("⬆️  Pushing UserStartedSpeakingFrame")
-            await self.push_frame(UserStartedSpeakingFrame())
-            logger.info("✓ User speaking state activated")
-            logger.info("=" * 70)
-        else:
-            logger.debug("👤 User already marked as speaking, skipping")
+        """Handle user started speaking event.
+
+        Deepgram compatibility: Always push StartInterruptionFrame first,
+        then check if already speaking before pushing UserStartedSpeakingFrame.
+        """
+        # Always push StartInterruptionFrame (Deepgram does this even if already speaking)
+        await self.push_frame(StartInterruptionFrame())
+
+        if self._user_speaking:
+            logger.debug("👤 User already marked as speaking, skipping UserStartedSpeakingFrame")
+            return
+
+        logger.info("=" * 70)
+        logger.info("👤 USER STARTED SPEAKING")
+        logger.info("=" * 70)
+
+        self._user_speaking = True
+        await self.push_frame(UserStartedSpeakingFrame())
+
+        logger.info("✓ User speaking state activated")
+        logger.info("=" * 70)
 
     async def _handle_user_silence(self):
-        """Handle user stopped speaking event."""
-        if self._user_speaking:
-            logger.info("=" * 70)
-            logger.info("👤 USER STOPPED SPEAKING")
-            logger.info("=" * 70)
-            self._user_speaking = False
-            self._current_speech_start_time = None
-            logger.debug("⬆️  Pushing UserStoppedSpeakingFrame UPSTREAM")
-            await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
-            logger.info("✓ User silence state activated")
-            logger.info("=" * 70)
-        else:
+        """Handle user stopped speaking event.
+
+        Deepgram compatibility: Push UserStoppedSpeakingFrame without explicit direction
+        (uses default DOWNSTREAM), and reset speech timer.
+        """
+        if not self._user_speaking:
             logger.debug("👤 User already marked as not speaking, skipping")
+            return
+
+        logger.info("=" * 70)
+        logger.info("👤 USER STOPPED SPEAKING")
+        logger.info("=" * 70)
+
+        self._user_speaking = False
+        self._current_speech_start_time = None
+
+        # Push without explicit direction (default DOWNSTREAM, matching Deepgram)
+        await self.push_frame(UserStoppedSpeakingFrame())
+
+        logger.info("✓ User silence state activated")
+        logger.info("=" * 70)
             
     async def _handle_bot_speaking(self):
         """Handle bot started speaking event."""
@@ -890,24 +983,48 @@ class SonioxSTTService(STTService):
         self._bot_started_speaking_time = None
         logger.debug(f"🤖 {self}: Bot stopped speaking")
 
-    async def _should_ignore_transcription(self, transcript: str) -> bool:
-        """Check if transcription should be ignored based on various conditions."""
+    async def _should_ignore_transcription(self, transcript: str, is_final: bool, confidence: float = 1.0, time_start: float = 0) -> bool:
+        """Check if transcription should be ignored based on various conditions.
 
-        # Ignore if bot is speaking and interruptions are not allowed
+        Deepgram compatibility: Enhanced to match all of Deepgram's filtering logic.
+
+        Args:
+            transcript: The transcript text
+            is_final: Whether this is a final transcript
+            confidence: Confidence score (0.0 to 1.0)
+            time_start: Start time of the transcript
+
+        Returns:
+            True if transcript should be ignored, False otherwise
+        """
+        # Check 1: Low confidence interims (Deepgram threshold: 0.7)
+        if not is_final and confidence < 0.7:
+            logger.debug(f"Ignoring interim due to low confidence: {confidence:.2f} < 0.7: '{transcript}'")
+            return True
+
+        # Check 2: Fast greetings at start
+        if self._should_ignore_fast_greeting(transcript, time_start):
+            logger.debug(f"Ignoring fast greeting at start: '{transcript}'")
+            return True
+
+        # Check 3: Repeated first message
+        if self._should_ignore_first_repeated_message(transcript):
+            logger.debug(f"Ignoring repeated first message: '{transcript}'")
+            return True
+
+        # Check 4: VAD inactive + interim (don't process interims when VAD is inactive)
+        if not self._vad_active and not is_final:
+            logger.debug(f"Ignoring interim - VAD inactive: '{transcript}'")
+            return True
+
+        # Check 5: Bot speaking + no interruptions allowed
         if self._bot_speaking and not self._allow_stt_interruptions:
             logger.debug(f"Ignoring transcript: bot speaking and interruptions disabled: '{transcript}'")
             return True
 
-        # IGNORE single-word transcriptions when bot is speaking (same as Deepgram)
-        # This prevents false interruptions from short utterances like "Sí", "Ok", etc.
+        # Check 6: Single word + bot speaking (prevent false interruptions)
         if self._bot_speaking and self._transcript_words_count(transcript) == 1:
             logger.debug(f"Ignoring single-word transcript while bot speaking: '{transcript}'")
-            return True
-
-        # Ignore fast greetings at start
-        time_since_init = self._time_since_init()
-        if self._should_ignore_fast_greeting(transcript, time_since_init):
-            logger.debug(f"Ignoring fast greeting at start: '{transcript}'")
             return True
 
         return False
@@ -962,57 +1079,76 @@ class SonioxSTTService(STTService):
         # EXACT match only (not fuzzy match) to avoid false positives
         return text.strip() == self._first_message.strip()
 
-    async def _detect_and_handle_voicemail(self, transcript: str):
-        """Detect and handle voicemail messages."""
+    async def _detect_and_handle_voicemail(self, transcript: str) -> bool:
+        """Detect and handle voicemail messages.
+
+        Deepgram compatibility: Returns bool and pushes BOTH TranscriptionFrame and VoicemailFrame.
+
+        Returns:
+            True if voicemail was detected and handled, False otherwise
+        """
+        if not self.detect_voicemail:
+            return False
+
         time_since_init = self._time_since_init()
 
-        # Only detect voicemail in the first N seconds
-        if time_since_init > VOICEMAIL_DETECTION_SECONDS:
-            return
+        # Only detect voicemail in the first N seconds AND after first transcript receipt
+        if time_since_init > VOICEMAIL_DETECTION_SECONDS and self._was_first_transcript_receipt:
+            return False
 
         # Check if transcript matches voicemail patterns
-        if voicemail.is_text_voicemail(transcript):
-            logger.info(f"🔊 Voicemail detected: '{transcript}'")
-            await self.push_frame(VoicemailFrame(text=transcript))
+        if not voicemail.is_text_voicemail(transcript):
+            return False
+
+        logger.info(f"🔊 Voicemail detected: '{transcript}'")
+
+        # Push BOTH frames (Deepgram compatibility)
+        await self.push_frame(
+            TranscriptionFrame(transcript, "", time_now_iso8601(), self._language)
+        )
+        await self.push_frame(
+            VoicemailFrame(text=transcript)
+        )
+
+        logger.debug("📤 Voicemail frames pushed")
+        return True
 
 
 
     async def _async_handle_accum_transcription(self, current_time):
         """Handle accumulated transcriptions with timeout.
-        
-        Note: With Soniox, we send transcripts immediately when is_final=true,
-        so this method is mostly for compatibility. The timeout logic is not needed.
+
+        Deepgram compatibility: Fast response mode is always active.
         """
-        # No longer accumulating - transcripts are sent immediately
-        pass
+        if not self._last_interim_time:
+            self._last_interim_time = 0.0
+
+        # Fast response mode is always active
+        await self._fast_response_send_accum_transcriptions()
 
     async def _handle_false_interim(self, current_time):
         """Handle false interim detection.
-        
-        DISABLED: Soniox provides explicit endpoint detection via <end> tokens,
-        so we don't need false interim detection. This was causing premature
-        UserStoppedSpeakingFrame to be sent before all tokens arrived.
+
+        Deepgram compatibility: Re-enabled to match Deepgram's behavior.
+        Detects when we get an interim but no follow-up, indicating false detection.
         """
-        return
-        
-        # Legacy code kept for reference:
-        # if not self._user_speaking:
-        #     return
-        # if not self._last_interim_time:
-        #     return
-        # if self._vad_active:
-        #     return
-        # # Don't trigger false interim if we have accumulated final tokens waiting to be sent
-        # if self._final_tokens:
-        #     return
-        #
-        # last_interim_delay = current_time - self._last_interim_time
-        #
-        # if last_interim_delay > FALSE_INTERIM_SECONDS:
-        #     return
-        #
-        # logger.debug("False interim detected")
-        # await self._handle_user_silence()
+        if not self._user_speaking:
+            return
+        if not self._last_interim_time:
+            return
+        if self._vad_active:
+            return
+        # Don't trigger false interim if we have accumulated final tokens waiting to be sent
+        if self._final_tokens:
+            return
+
+        last_interim_delay = current_time - self._last_interim_time
+
+        if last_interim_delay > FALSE_INTERIM_SECONDS:
+            return
+
+        logger.debug("🚨 False interim detected - triggering user silence")
+        await self._handle_user_silence()
 
     async def _async_handler(self, task_name):
         """Async handler for timeout management and false interim detection."""
@@ -1030,7 +1166,7 @@ class SonioxSTTService(STTService):
                     # If no new tokens at all for 800ms, consider it an endpoint
                     if elapsed > 0.8:
                         logger.debug(f"🔚 Endpoint detected by timeout ({elapsed:.2f}s since last ANY token)")
-                        await self._send_accumulated_transcription()
+                        await self._send_accumulated_tokens()
 
                 await self._async_handle_accum_transcription(current_time)
                 await self._handle_false_interim(current_time)
@@ -1046,13 +1182,47 @@ class SonioxSTTService(STTService):
             logger.debug("🛑 Async handler task completed")
 
     async def _fast_response_send_accum_transcriptions(self):
-        """Send accumulated transcriptions immediately if fast response is enabled.
-        
-        Note: No longer used with Soniox as transcripts are sent immediately.
-        Kept for compatibility.
+        """Send accumulated transcriptions with intelligent timing logic.
+
+        Deepgram compatibility: Fast response mode is always active for optimal performance.
         """
-        # No longer accumulating - transcripts are sent immediately
-        pass
+        if len(self._accum_transcription_frames) == 0:
+            return
+
+        current_time = time.time()
+
+        # Bypass VAD check if we have a complete sentence (ends with punctuation)
+        if self._vad_active:
+            if len(self._accum_transcription_frames) > 0:
+                last_text = self._accum_transcription_frames[-1].text.strip()
+                has_ending_punctuation = last_text and last_text[-1] in '.?!'
+                if not has_ending_punctuation:
+                    # Do not send if VAD is active and it's been less than 10 seconds since first message
+                    if self._first_message_time and (current_time - self._first_message_time) > 10.0:
+                        return
+
+        last_message_time = max(self._last_interim_time or 0, self._last_time_accum_transcription)
+
+        is_short_sentence = len(self._accum_transcription_frames) <= 2
+        is_sentence_end = not self._is_accum_transcription(self._accum_transcription_frames[-1].text)
+        time_since_last_message = current_time - last_message_time
+
+        if is_short_sentence:
+            if is_sentence_end:
+                logger.debug("🚀 Fast response: Sending accum transcriptions (short sentence, end of phrase)")
+                await self._send_accum_transcriptions()
+
+            if not is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds:
+                logger.debug("🚀 Fast response: Sending accum transcriptions (short sentence, timeout)")
+                await self._send_accum_transcriptions()
+        else:
+            if is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds:
+                logger.debug("🚀 Fast response: Sending accum transcriptions (long sentence, end of phrase)")
+                await self._send_accum_transcriptions()
+
+            if not is_sentence_end and time_since_last_message > self._on_no_punctuation_seconds * 2:
+                logger.debug("🚀 Fast response: Sending accum transcriptions (long sentence, timeout)")
+                await self._send_accum_transcriptions()
 
     def get_stt_stats(self) -> Dict:
         """Get comprehensive STT performance statistics."""
