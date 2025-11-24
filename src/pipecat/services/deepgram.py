@@ -1238,8 +1238,12 @@ class DeepgramSTTService(STTService):
                 logger.debug(f"{self} disconnecting old connection before retry")
                 await self._disconnect()
 
-                if self._error_count >= len(self.backup_api_keys):
-                    logger.error(f"{self} too many connection errors, no more backup API keys available")
+                # Increment error count first
+                self._error_count += 1
+                
+                # Check if we've exhausted all backup keys
+                if self._error_count > len(self.backup_api_keys):
+                    logger.error(f"{self} exhausted all {len(self.backup_api_keys)} backup API keys (tried {self._error_count} times)")
 
                     # Check if Gladia backup is available
                     if self._backup_enabled and self._intelligent_gladia_backup:
@@ -1262,9 +1266,9 @@ class DeepgramSTTService(STTService):
                         self._on_connection_error(DeepgramFatalError(f"No STT service available: {error}"))
                     return
 
-                self._error_count += 1
+                # Use the next backup key (cycle through the list)
                 self.api_key = self.backup_api_keys[self._error_count - 1]
-                logger.info(f"{self} switching to backup Deepgram API key: {self.api_key[:10]}...")
+                logger.info(f"{self} switching to backup Deepgram API key #{self._error_count}: {self.api_key[:10]}...")
                 await self._connect()
 
             finally:
