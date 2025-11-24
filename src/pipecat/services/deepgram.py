@@ -1269,10 +1269,14 @@ class DeepgramSTTService(STTService):
                 # Use the next backup key (cycle through the list)
                 self.api_key = self.backup_api_keys[self._error_count - 1]
                 logger.info(f"{self} switching to backup Deepgram API key #{self._error_count}: {self.api_key[:10]}...")
+
+                # Reset reconnecting flag BEFORE calling _connect()
+                # This allows subsequent connection failures to retry with the next backup key
+                self._reconnecting = False
                 await self._connect()
 
             finally:
-                # Always reset reconnecting flag
+                # Ensure reconnecting flag is always reset
                 self._reconnecting = False
 
     async def _on_speech_started(self, *args, **kwargs):
