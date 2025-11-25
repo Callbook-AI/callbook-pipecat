@@ -448,7 +448,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         if self._websocket:
             msg = {"text": text + " "}
             logger.debug(f"{self}::Sending websocket msg: { msg }")
-            self._bot_speaking = True
+            #self._bot_speaking = True
             await self._websocket.send(json.dumps(msg))
 
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
