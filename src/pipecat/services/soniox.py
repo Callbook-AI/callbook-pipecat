@@ -1022,9 +1022,12 @@ class SonioxSTTService(STTService):
             logger.debug(f"Ignoring transcript: bot speaking and interruptions disabled: '{transcript}'")
             return True
 
-        # Check 6: Single word + bot speaking (prevent false interruptions)
-        if self._bot_speaking and self._transcript_words_count(transcript) == 1:
-            logger.debug(f"Ignoring single-word transcript while bot speaking: '{transcript}'")
+        # Check 6: Short transcripts + bot speaking (prevent false interruptions)
+        # Block transcripts with 2 or fewer words OR less than 15 characters
+        word_count = self._transcript_words_count(transcript)
+        char_count = len(transcript.strip())
+        if self._bot_speaking and (word_count <= 2 or char_count < 15):
+            logger.debug(f"Ignoring short transcript while bot speaking: '{transcript}' (words={word_count}, chars={char_count})")
             return True
 
         return False
