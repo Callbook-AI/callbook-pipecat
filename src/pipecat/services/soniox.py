@@ -945,14 +945,17 @@ class SonioxSTTService(STTService):
             logger.debug("👤 User already marked as speaking, skipping interruption frames")
             return
 
-        # Push StartInterruptionFrame to interrupt the bot if speaking
-        await self.push_frame(StartInterruptionFrame())
+        # CRITICAL: Set flag IMMEDIATELY to prevent race conditions
+        # Multiple concurrent calls can happen within milliseconds, and if we
+        # set this flag after the await, both calls will pass the check above
+        self._user_speaking = True
 
         logger.info("=" * 70)
         logger.info("👤 USER STARTED SPEAKING")
         logger.info("=" * 70)
 
-        self._user_speaking = True
+        # Push interruption frames AFTER setting the flag
+        await self.push_frame(StartInterruptionFrame())
         await self.push_frame(UserStartedSpeakingFrame())
 
         logger.info("✓ User speaking state activated")
@@ -968,14 +971,15 @@ class SonioxSTTService(STTService):
             logger.debug("👤 User already marked as not speaking, skipping")
             return
 
+        # CRITICAL: Set flags IMMEDIATELY to prevent race conditions
+        self._user_speaking = False
+        self._current_speech_start_time = None
+
         logger.info("=" * 70)
         logger.info("👤 USER STOPPED SPEAKING")
         logger.info("=" * 70)
 
-        self._user_speaking = False
-        self._current_speech_start_time = None
-
-        # Push without explicit direction (default DOWNSTREAM, matching Deepgram)
+        # Push frame AFTER setting flags
         await self.push_frame(UserStoppedSpeakingFrame())
 
         logger.info("✓ User silence state activated")
