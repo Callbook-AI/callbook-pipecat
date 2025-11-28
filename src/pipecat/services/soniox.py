@@ -743,6 +743,11 @@ class SonioxSTTService(STTService):
         Deepgram compatibility: This is the critical method that sends frames in the correct order:
         1. All accumulated TranscriptionFrames
         2. UserStoppedSpeakingFrame (to signal end of user speech)
+
+        Note: We do NOT call _handle_user_speaking() here because it was already called
+        in _on_final_transcript_message() before accumulating. Calling it again would
+        trigger a second StartInterruptionFrame which causes pipeline task cancellations
+        and race conditions that can lose the transcription frames.
         """
         if not len(self._accum_transcription_frames):
             logger.debug("No accumulated transcriptions to send")
@@ -753,7 +758,12 @@ class SonioxSTTService(STTService):
         logger.info(f"   Frame count: {len(self._accum_transcription_frames)}")
         logger.info("=" * 70)
 
-        await self._handle_user_speaking()
+        # Note: _handle_user_speaking() was already called in _on_final_transcript_message()
+        # which triggered the StartInterruptionFrame. We only call it here as a fallback
+        # if user is not marked as speaking (edge case from async timeout handler).
+        if not self._user_speaking:
+            logger.debug("⚠️  User not marked as speaking, triggering user speaking state")
+            await self._handle_user_speaking()
 
         # Send all accumulated transcription frames
         for frame in self._accum_transcription_frames:
@@ -927,15 +937,16 @@ class SonioxSTTService(STTService):
     async def _handle_user_speaking(self):
         """Handle user started speaking event.
 
-        Deepgram compatibility: Always push StartInterruptionFrame first,
-        then check if already speaking before pushing UserStartedSpeakingFrame.
+        Push StartInterruptionFrame and UserStartedSpeakingFrame only when user
+        is NOT already marked as speaking. This prevents multiple interruption
+        cycles that can cause pipeline task cancellation race conditions.
         """
-        # Always push StartInterruptionFrame (Deepgram does this even if already speaking)
-        await self.push_frame(StartInterruptionFrame())
-
         if self._user_speaking:
-            logger.debug("👤 User already marked as speaking, skipping UserStartedSpeakingFrame")
+            logger.debug("👤 User already marked as speaking, skipping interruption frames")
             return
+
+        # Push StartInterruptionFrame to interrupt the bot if speaking
+        await self.push_frame(StartInterruptionFrame())
 
         logger.info("=" * 70)
         logger.info("👤 USER STARTED SPEAKING")
