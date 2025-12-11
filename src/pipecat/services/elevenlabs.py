@@ -293,33 +293,12 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def flush_audio(self):
-        ws = getattr(self, "_websocket", None)
-        if ws is None or getattr(ws, "closed", True) or not getattr(ws, "open", False):
-            return
-
-        msg = {"text": " ", "flush": True}
-        try:
-            await ws.send(json.dumps(msg))
-        except websockets.ConnectionClosedOK:
-            logger.debug(f"{self} flush_audio skipped – websocket closed (OK).")
-        except websockets.ConnectionClosedError as e:
-            logger.debug(f"{self} flush_audio skipped – connection closed: {e}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.debug(f"{self} flush_audio skipped – unexpected error: {e}")
-
-    async def flush_audio_to_ignore(self):
-        if self._started:
-            logger.debug("Flushing to ignore")
-            self._started = False
-            await self.flush_audio()
-
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
         if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
-            await self.flush_audio_to_ignore()
+            # On interruption or stop, just stop processing incoming audio
+            # Don't send flush - let ElevenLabs naturally finish
+            logger.debug(f"Stopping audio processing due to {type(frame).__name__}")
             self._started = False
             if isinstance(frame, TTSStoppedFrame):
                 await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
