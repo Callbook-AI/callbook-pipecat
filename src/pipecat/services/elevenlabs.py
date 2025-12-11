@@ -254,9 +254,6 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         self._started = False
         self._cumulative_time = 0
 
-        # Indicates whether we should discard incoming audio (for interruptions)
-        self._should_discard_audio = False
-
         self._receive_task = None
         self._keepalive_task = None
 
@@ -296,21 +293,36 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         await super().cancel(frame)
         await self._disconnect()
 
+    async def flush_audio(self):
+        ws = getattr(self, "_websocket", None)
+        if ws is None or getattr(ws, "closed", True) or not getattr(ws, "open", False):
+            return
+
+        msg = {"text": " ", "flush": True}
+        try:
+            await ws.send(json.dumps(msg))
+        except websockets.ConnectionClosedOK:
+            logger.debug(f"{self} flush_audio skipped – websocket closed (OK).")
+        except websockets.ConnectionClosedError as e:
+            logger.debug(f"{self} flush_audio skipped – connection closed: {e}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"{self} flush_audio skipped – unexpected error: {e}")
+
+    async def flush_audio_to_ignore(self):
+        if self._started:
+            logger.debug("Flushing to ignore")
+            self._started = False
+            await self.flush_audio()
+
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
-
-        if isinstance(frame, StartInterruptionFrame):
-            # On interruption, mark audio for discard but keep consuming messages
-            logger.debug("Interruption detected - marking audio for discard")
-            self._should_discard_audio = True
+        if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
+            await self.flush_audio_to_ignore()
             self._started = False
-
-        elif isinstance(frame, TTSStoppedFrame):
-            # On TTS stopped, reset discard flag for next TTS
-            logger.debug("TTS stopped - resetting discard flag")
-            self._should_discard_audio = False
-            self._started = False
-            await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
+            if isinstance(frame, TTSStoppedFrame):
+                await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
 
     async def _connect(self):
         await self._connect_websocket()
@@ -380,16 +392,11 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
 
             if self._websocket:
                 logger.debug("Disconnecting from ElevenLabs")
-                try:
-                    await self._websocket.send(json.dumps({"text": ""}))
-                    await self._websocket.close()
-                except Exception:
-                    # Ignore errors when closing - connection may already be dead
-                    pass
+                await self._websocket.send(json.dumps({"text": ""}))
+                await self._websocket.close()
                 self._websocket = None
 
             self._started = False
-            self._should_discard_audio = False
         except Exception as e:
             logger.error(f"{self} error closing websocket: {e}")
 
@@ -401,13 +408,15 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
     async def _receive_messages(self):
         async for message in self._get_websocket():
             logger.debug("Receiving message")
+            # Always parse message to consume it from the socket
             msg = json.loads(message)
 
-            # Always consume messages, but decide whether to process them
-            if self._should_discard_audio:
-                logger.debug("Discarding audio due to interruption")
+            # But only process if we're started
+            if not self._started:
+                logger.debug("Ignoring message, not started (but still consuming from socket)")
                 continue
 
+            logger.debug('Message not Ignored')
             if msg.get("audio"):
                 logger.debug('Message has Audio')
                 await self.stop_ttfb_metrics()
@@ -454,8 +463,6 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                     yield TTSStartedFrame()
                     self._started = True
                     self._cumulative_time = 0
-                    # Reset discard flag when starting new TTS
-                    self._should_discard_audio = False
 
                 await self._send_text(text)
                 await self.start_tts_usage_metrics(text)
@@ -485,9 +492,9 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
 
                 # If it's a fatal error, don't try to reconnect
                 if not is_fatal:
-                    logger.info(f"{self} reconnecting after non-fatal error...")
                     await self._connect()
-                return
+                else:
+                    return
             yield None
         except Exception as e:
             error_msg = str(e)
