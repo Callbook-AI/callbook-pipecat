@@ -254,6 +254,10 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         self._started = False
         self._cumulative_time = 0
 
+        # Flag to discard incoming audio during interruptions
+        # This is separate from _started to avoid ignoring initial connection messages
+        self._should_discard_audio = False
+
         self._receive_task = None
         self._keepalive_task = None
 
@@ -295,13 +299,19 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
-        if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
-            # On interruption or stop, just mark that we should ignore incoming audio
-            # Don't send flush - it can confuse ElevenLabs and cause connection issues
-            logger.debug(f"Stopping audio processing due to {type(frame).__name__}, _started was {self._started}")
+
+        if isinstance(frame, StartInterruptionFrame):
+            # On interruption, mark audio for discard but keep consuming messages
+            logger.debug("Interruption detected - marking audio for discard")
+            self._should_discard_audio = True
             self._started = False
-            if isinstance(frame, TTSStoppedFrame):
-                await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
+
+        elif isinstance(frame, TTSStoppedFrame):
+            # On TTS stopped, reset discard flag for next TTS
+            logger.debug("TTS stopped - resetting discard flag")
+            self._should_discard_audio = False
+            self._started = False
+            await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
 
     async def _connect(self):
         await self._connect_websocket()
@@ -386,18 +396,18 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
 
     async def _receive_messages(self):
         try:
+            logger.info(f"{self} _receive_messages() started, waiting for messages from ElevenLabs...")
             async for message in self._get_websocket():
                 try:
                     logger.debug("Receiving message")
                     # Always parse message to consume it from the socket
                     msg = json.loads(message)
 
-                    # But only process if we're started
-                    if not self._started:
-                        logger.debug("Ignoring message, not started (but still consuming from socket)")
+                    # Check if we should discard audio (during interruptions)
+                    if self._should_discard_audio:
+                        logger.debug("Discarding audio due to interruption")
                         continue
 
-                    logger.debug('Message not Ignored')
                     if msg.get("audio"):
                         logger.debug('Message has Audio')
                         await self.stop_ttfb_metrics()
