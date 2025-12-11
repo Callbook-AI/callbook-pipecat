@@ -254,10 +254,6 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         self._started = False
         self._cumulative_time = 0
 
-        # Flag to discard incoming audio during interruptions
-        # This is separate from _started to avoid ignoring initial connection messages
-        self._should_discard_audio = False
-
         self._receive_task = None
         self._keepalive_task = None
 
@@ -299,19 +295,10 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
-
-        if isinstance(frame, StartInterruptionFrame):
-            # On interruption, mark audio for discard but keep consuming messages
-            logger.debug("Interruption detected - marking audio for discard")
-            self._should_discard_audio = True
+        if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
             self._started = False
-
-        elif isinstance(frame, TTSStoppedFrame):
-            # On TTS stopped, reset discard flag for next TTS
-            logger.debug("TTS stopped - resetting discard flag")
-            self._should_discard_audio = False
-            self._started = False
-            await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
+            if isinstance(frame, TTSStoppedFrame):
+                await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
 
     async def _connect(self):
         await self._connect_websocket()
@@ -368,8 +355,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             }
             if self._voice_settings:
                 msg["voice_settings"] = self._voice_settings
-            logger.debug(msg["voice_settings"])
-            
+
             await self._websocket.send(json.dumps(msg))
         except Exception as e:
             logger.error(f"{self} initialization error: {e}")
@@ -395,42 +381,31 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         raise Exception("Websocket not connected")
 
     async def _receive_messages(self):
-        try:
-            logger.info(f"{self} _receive_messages() started, waiting for messages from ElevenLabs...")
-            async for message in self._get_websocket():
-                try:
-                    logger.debug("Receiving message")
-                    # Always parse message to consume it from the socket
-                    msg = json.loads(message)
+        async for message in self._get_websocket():
+            logger.debug("Receiving message")
+            # Always parse message to consume it from the socket (prevents buffer overflow)
+            msg = json.loads(message)
 
-                    # Check if we should discard audio (during interruptions)
-                    if self._should_discard_audio:
-                        logger.debug("Discarding audio due to interruption")
-                        continue
+            # Only process if we're started (but we still consumed the message above)
+            if not self._started:
+                logger.debug("Ignoring message, not started (but consumed from socket to prevent buffer overflow)")
+                continue
 
-                    if msg.get("audio"):
-                        logger.debug('Message has Audio')
-                        await self.stop_ttfb_metrics()
-                        self.start_word_timestamps()
+            logger.debug('Message not Ignored')
+            if msg.get("audio"):
+                logger.debug('Message has Audio')
+                await self.stop_ttfb_metrics()
+                self.start_word_timestamps()
 
-                        audio = base64.b64decode(msg["audio"])
-                        frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
-                        await self.push_frame(frame)
-                    if msg.get("alignment"):
-                        logger.debug('Message has Alignment')
-                        logger.debug(f"Received message from Elevenlabs: {''.join(msg['alignment'].get('chars'))}")
-                        word_times = calculate_word_times(msg["alignment"], self._cumulative_time)
-                        await self.add_word_timestamps(word_times)
-                        self._cumulative_time = word_times[-1][1]
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse message from ElevenLabs: {e}, message: {message[:200]}")
-                    continue
-                except Exception as e:
-                    logger.error(f"Error processing message from ElevenLabs: {e}")
-                    continue
-        except Exception as e:
-            logger.error(f"Error in _receive_messages loop: {e}")
-            raise
+                audio = base64.b64decode(msg["audio"])
+                frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
+                await self.push_frame(frame)
+            if msg.get("alignment"):
+                logger.debug('Message has Alignment')
+                logger.debug(f"Received message from Elevenlabs: {''.join(msg['alignment'].get('chars'))}")
+                word_times = calculate_word_times(msg["alignment"], self._cumulative_time)
+                await self.add_word_timestamps(word_times)
+                self._cumulative_time = word_times[-1][1]
 
     async def _keepalive_task_handler(self, task_name):
         while True:
@@ -445,16 +420,9 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
 
     async def _send_text(self, text: str):
         if self._websocket:
-            ws_state = getattr(self._websocket, 'state', 'unknown')
-            ws_open = getattr(self._websocket, 'open', False)
-            ws_closed = getattr(self._websocket, 'closed', True)
-            logger.debug(f"{self}::Websocket state before send - state:{ws_state}, open:{ws_open}, closed:{ws_closed}, _started:{self._started}")
             msg = {"text": text + " "}
             logger.debug(f"{self}::Sending websocket msg: { msg }")
-            #self._bot_speaking = True
             await self._websocket.send(json.dumps(msg))
-        else:
-            logger.error(f"{self}::Cannot send text - websocket is None!")
 
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         logger.debug(f"{self}: Generating TTS [{text}]")
