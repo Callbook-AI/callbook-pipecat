@@ -480,9 +480,19 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     """
 
-    def __init__(self, context: OpenAILLMContext, *, expect_stripped_words: bool = True, **kwargs):
+    def __init__(
+        self,
+        context: OpenAILLMContext,
+        *,
+        expect_stripped_words: bool = True,
+        notify_on_interruption: bool = False,
+        interruption_message: str = "Your previous response was interrupted by the user. Continue naturally.",
+        **kwargs
+    ):
         super().__init__(context=context, role="assistant", **kwargs)
         self._expect_stripped_words = expect_stripped_words
+        self._notify_on_interruption = notify_on_interruption
+        self._interruption_message = interruption_message
 
         self._started = False
 
@@ -492,9 +502,18 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, StartInterruptionFrame):
+            # Check if we had content when interrupted (bot was actually speaking)
+            was_speaking = len(self._aggregation.strip()) > 0
             await self.push_aggregation()
             # Reset anyways
             self.reset()
+            # Add system message to notify LLM about interruption
+            if was_speaking and self._notify_on_interruption:
+                self._context.add_message({
+                    "role": "system",
+                    "content": self._interruption_message
+                })
+                logger.debug(f"Added interruption notification to context: {self._interruption_message}")
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMFullResponseStartFrame):
             await self._handle_llm_start(frame)
