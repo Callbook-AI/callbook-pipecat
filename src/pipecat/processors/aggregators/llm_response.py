@@ -508,13 +508,17 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             await self.push_aggregation()
             # Reset anyways
             self.reset()
-            # Add system message to notify LLM about interruption
-            if was_speaking and self._notify_on_interruption:
-                self._context.add_message({
-                    "role": "system",
-                    "content": self._interruption_message
-                })
-                logger.info(f"🔔 Added interruption notification to context: {self._interruption_message}")
+            # DISABLED: Interruption notification is now handled by user_idle.py which has
+            # a more accurate check based on actual TTS playback state (_bot_speaking flag).
+            # The was_speaking check here (based on _aggregation content) was triggering
+            # on every user turn, not just actual interruptions.
+            # See: callbook-core/user_idle.py lines 407-413 for the correct implementation.
+            # if was_speaking and self._notify_on_interruption:
+            #     self._context.add_message({
+            #         "role": "system",
+            #         "content": self._interruption_message
+            #     })
+            #     logger.info(f"🔔 Added interruption notification to context: {self._interruption_message}")
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMFullResponseStartFrame):
             await self._handle_llm_start(frame)
