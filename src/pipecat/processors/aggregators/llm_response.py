@@ -504,6 +504,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         if isinstance(frame, StartInterruptionFrame):
             # Check if we had content when interrupted (bot was actually speaking)
             was_speaking = len(self._aggregation.strip()) > 0
+            logger.info(f"⚡ StartInterruptionFrame received - was_speaking={was_speaking}, aggregation_len={len(self._aggregation)}, notify_enabled={self._notify_on_interruption}")
             await self.push_aggregation()
             # Reset anyways
             self.reset()
@@ -513,7 +514,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
                     "role": "system",
                     "content": self._interruption_message
                 })
-                logger.debug(f"Added interruption notification to context: {self._interruption_message}")
+                logger.info(f"🔔 Added interruption notification to context: {self._interruption_message}")
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMFullResponseStartFrame):
             await self._handle_llm_start(frame)
