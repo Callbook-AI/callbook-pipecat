@@ -502,23 +502,25 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, StartInterruptionFrame):
-            # Check if we had content when interrupted (bot was actually speaking)
-            was_speaking = len(self._aggregation.strip()) > 0
-            logger.info(f"⚡ StartInterruptionFrame received - was_speaking={was_speaking}, aggregation_len={len(self._aggregation)}, notify_enabled={self._notify_on_interruption}")
+            # Check if we're CURRENTLY generating a response AND have content
+            # CRITICAL: Must check _started flag, not just aggregation content.
+            # _aggregation might have stale content if not properly cleared,
+            # but _started accurately reflects whether LLM is actively generating.
+            was_generating = self._started and len(self._aggregation.strip()) > 0
+            logger.info(f"⚡ StartInterruptionFrame received - was_generating={was_generating}, _started={self._started}, aggregation_len={len(self._aggregation)}, notify_enabled={self._notify_on_interruption}")
             await self.push_aggregation()
             # Reset anyways
             self.reset()
-            # DISABLED: Interruption notification is now handled by user_idle.py which has
-            # a more accurate check based on actual TTS playback state (_bot_speaking flag).
-            # The was_speaking check here (based on _aggregation content) was triggering
-            # on every user turn, not just actual interruptions.
-            # See: callbook-core/user_idle.py lines 407-413 for the correct implementation.
-            # if was_speaking and self._notify_on_interruption:
-            #     self._context.add_message({
-            #         "role": "system",
-            #         "content": self._interruption_message
-            #     })
-            #     logger.info(f"🔔 Added interruption notification to context: {self._interruption_message}")
+            # Add system message to notify LLM about interruption ONLY when bot was actively generating
+            # This prevents false positives during normal turn-taking
+            if was_generating and self._notify_on_interruption:
+                self._context.add_message({
+                    "role": "system",
+                    "content": self._interruption_message
+                })
+                logger.info(f"🔔 Added interruption notification to context")
+            else:
+                logger.debug(f"No interruption notification: was_generating={was_generating}, _started={self._started}, notify_enabled={self._notify_on_interruption}")
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMFullResponseStartFrame):
             await self._handle_llm_start(frame)
