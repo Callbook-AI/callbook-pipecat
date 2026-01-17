@@ -495,6 +495,8 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         self._interruption_message = interruption_message
 
         self._started = False
+        self._llm_start_time = 0  # Track when LLM started generating
+        self._response_count = 0  # Track response number for debugging
 
         self.reset()
 
@@ -503,16 +505,29 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
         if isinstance(frame, StartInterruptionFrame):
             # Check if we're CURRENTLY generating a response AND have content
-            # CRITICAL: Must check _started flag, not just aggregation content.
-            # _aggregation might have stale content if not properly cleared,
-            # but _started accurately reflects whether LLM is actively generating.
-            was_generating = self._started and len(self._aggregation.strip()) > 0
-            logger.info(f"⚡ StartInterruptionFrame received - was_generating={was_generating}, _started={self._started}, aggregation_len={len(self._aggregation)}, notify_enabled={self._notify_on_interruption}")
+            # CRITICAL: Must also check if LLM started RECENTLY - if so, this interruption
+            # is likely a delayed frame from BEFORE the LLM started (not a real interruption)
+            #
+            # The issue: When user speaks, the pipeline processes their transcription,
+            # which triggers LLM to start generating a response. Meanwhile, StartInterruptionFrame
+            # is still propagating through the pipeline. By the time it arrives here,
+            # _started=True (for the NEW response), causing false positive.
+            #
+            # Fix: If LLM started very recently (< 1 second), the interruption frame is likely
+            # from BEFORE the LLM started, so it's NOT a real interruption.
+
+            time_since_llm_start = time.time() - self._llm_start_time if self._llm_start_time > 0 else float('inf')
+            llm_started_recently = time_since_llm_start < 1.0  # Less than 1 second ago
+
+            was_generating = self._started and len(self._aggregation.strip()) > 0 and not llm_started_recently
+
+            logger.info(f"⚡ StartInterruptionFrame received - was_generating={was_generating}, _started={self._started}, aggregation_len={len(self._aggregation)}, time_since_llm_start={time_since_llm_start:.3f}s, llm_started_recently={llm_started_recently}, notify_enabled={self._notify_on_interruption}")
+
             await self.push_aggregation()
             # Reset anyways
             self.reset()
             # Add system message to notify LLM about interruption ONLY when bot was actively generating
-            # This prevents false positives during normal turn-taking
+            # AND the LLM didn't just start (which would indicate this is a response to user, not being interrupted)
             if was_generating and self._notify_on_interruption:
                 self._context.add_message({
                     "role": "system",
@@ -520,7 +535,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
                 })
                 logger.info(f"🔔 Added interruption notification to context")
             else:
-                logger.debug(f"No interruption notification: was_generating={was_generating}, _started={self._started}, notify_enabled={self._notify_on_interruption}")
+                logger.debug(f"No interruption notification: was_generating={was_generating}, _started={self._started}, llm_started_recently={llm_started_recently}, notify_enabled={self._notify_on_interruption}")
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMFullResponseStartFrame):
             await self._handle_llm_start(frame)
@@ -544,10 +559,13 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     async def _handle_llm_start(self, _: LLMFullResponseStartFrame):
         self._started = True
+        self._llm_start_time = time.time()
+        self._response_count += 1
+        logger.info(f"🟢 LLMFullResponseStartFrame - response #{self._response_count} starting")
 
     async def _handle_llm_end(self, _: LLMFullResponseEndFrame):
         self._started = False
-        logger.debug("Aggregating because LLMFullResponseEndFrame")
+        logger.info(f"🔴 LLMFullResponseEndFrame - response #{self._response_count} ended, aggregation_len={len(self._aggregation)}")
         await self.push_aggregation()
 
     async def _handle_text(self, frame: TextFrame):
