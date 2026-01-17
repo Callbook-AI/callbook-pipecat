@@ -24,6 +24,7 @@ from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     StartFrame,
     StartInterruptionFrame,
+    StopTaskFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
@@ -372,8 +373,10 @@ class SonioxSTTService(STTService):
             logger.error("  4. API endpoint URL incorrect")
             logger.error("  5. Account not active or insufficient credits")
             logger.error("=" * 70)
-            await self.push_error(ErrorFrame(f"Soniox connection failed: {e}"))
-            
+            # FATAL: Connection failed - terminate pipeline to prevent TTS waste
+            await self.push_error(ErrorFrame(f"Soniox connection failed: {e}", fatal=True))
+            await self._terminate_pipeline("STT connection failed - HTTP status error")
+
         except websockets.exceptions.InvalidURI as e:
             logger.error("=" * 70)
             logger.error("❌ SONIOX CONNECTION FAILED - INVALID URI")
@@ -381,8 +384,10 @@ class SonioxSTTService(STTService):
             logger.error(f"URI Error: {e}")
             logger.error(f"Attempted URI: {uri if 'uri' in locals() else 'Not constructed'}")
             logger.error("=" * 70)
-            await self.push_error(ErrorFrame(f"Soniox invalid URI: {e}"))
-            
+            # FATAL: Connection failed - terminate pipeline to prevent TTS waste
+            await self.push_error(ErrorFrame(f"Soniox invalid URI: {e}", fatal=True))
+            await self._terminate_pipeline("STT connection failed - invalid URI")
+
         except Exception as e:
             logger.error("=" * 70)
             logger.error("❌ SONIOX CONNECTION FAILED - UNEXPECTED ERROR")
@@ -392,7 +397,9 @@ class SonioxSTTService(STTService):
             logger.error(f"API Key (masked): {self._api_key[:10]}...{self._api_key[-4:] if len(self._api_key) > 14 else '****'}")
             logger.exception("Full traceback:")
             logger.error("=" * 70)
-            await self.push_error(ErrorFrame(f"Soniox connection failed: {e}"))
+            # FATAL: Connection failed - terminate pipeline to prevent TTS waste
+            await self.push_error(ErrorFrame(f"Soniox connection failed: {e}", fatal=True))
+            await self._terminate_pipeline("STT connection failed - unexpected error")
 
     async def _disconnect(self):
         """Disconnect from Soniox service and clean up resources."""
@@ -447,6 +454,27 @@ class SonioxSTTService(STTService):
         logger.info("⏳ Waiting 1 second before reconnection attempt...")
         await asyncio.sleep(1)
         await self._connect()
+
+    async def _terminate_pipeline(self, reason: str):
+        """Terminate the pipeline by pushing StopTaskFrame.
+
+        This is called when STT connection fails to prevent the pipeline
+        from continuing to consume TTS credits without functional STT.
+
+        Args:
+            reason: Human-readable reason for termination
+        """
+        logger.error("=" * 70)
+        logger.error("🛑 TERMINATING PIPELINE DUE TO STT FAILURE")
+        logger.error(f"   Reason: {reason}")
+        logger.error("   This prevents unnecessary TTS (ElevenLabs) credit consumption")
+        logger.error("=" * 70)
+
+        # Push StopTaskFrame to signal pipeline termination
+        # This will be caught by the pipeline runner and trigger graceful shutdown
+        await self.push_frame(StopTaskFrame())
+
+        logger.info("✅ StopTaskFrame pushed - pipeline will terminate")
 
     async def _receive_task_handler(self):
         """Handle incoming transcription messages from Soniox."""
