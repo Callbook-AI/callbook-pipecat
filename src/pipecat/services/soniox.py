@@ -158,6 +158,15 @@ class SonioxSTTService(STTService):
         logger.info(f"  Detect voicemail: {self.detect_voicemail}")
         logger.info(f"  No punctuation timeout: {self._on_no_punctuation_seconds}s")
 
+    def get_allow_interruptions(self) -> bool:
+        """Get the current allow_interruptions setting."""
+        return self._allow_stt_interruptions
+
+    def set_allow_interruptions(self, value: bool):
+        """Set the allow_interruptions setting."""
+        logger.debug(f"SonioxSTTService: set_allow_interruptions({value})")
+        self._allow_stt_interruptions = value
+
     def can_generate_metrics(self) -> bool:
         return True
 

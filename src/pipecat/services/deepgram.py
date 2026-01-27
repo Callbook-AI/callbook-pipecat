@@ -805,11 +805,20 @@ class DeepgramSTTService(STTService):
             
             self._backup_enabled = True
             logger.info(f"🎯 DeepgramSTTService: ✅ Intelligent backup enabled for {gladia_language} (timeout: {self._gladia_timeout}s)")
-            
+
         except Exception as e:
             logger.exception(f"❌ DeepgramSTTService: Intelligent backup setup failed: {e}")
             self._intelligent_gladia_backup = None
             self._backup_enabled = False
+
+    def get_allow_interruptions(self) -> bool:
+        """Get the current allow_interruptions setting."""
+        return self._allow_stt_interruptions
+
+    def set_allow_interruptions(self, value: bool):
+        """Set the allow_interruptions setting."""
+        logger.debug(f"DeepgramSTTService: set_allow_interruptions({value})")
+        self._allow_stt_interruptions = value
 
     async def intelligent_backup_handler(self, transcript: str, confidence: float, timestamp: float, is_backup: bool):
         """Handle intelligent backup transcription from Gladia."""

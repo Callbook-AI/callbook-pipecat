@@ -130,6 +130,15 @@ class GladiaSTTService(STTService):
         logger.info(f"  Model: {self._model}, Language: {self.language}")
         logger.info(f"  Allow Interruptions: {self._allow_stt_interruptions}, Detect Voicemail: {self.detect_voicemail}")
 
+    def get_allow_interruptions(self) -> bool:
+        """Get the current allow_interruptions setting."""
+        return self._allow_stt_interruptions
+
+    def set_allow_interruptions(self, value: bool):
+        """Set the allow_interruptions setting."""
+        logger.debug(f"GladiaSTTService: set_allow_interruptions({value})")
+        self._allow_stt_interruptions = value
+
     def language_to_service_language(self, language: Language) -> Optional[str]:
         return language_to_gladia_language(language)
 
