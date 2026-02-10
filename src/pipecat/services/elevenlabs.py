@@ -293,7 +293,6 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         await super().cancel(frame)
         await self._disconnect()
 
-    
     async def flush_audio(self):
         ws = getattr(self, "_websocket", None)
         if ws is None or getattr(ws, "closed", True) or not getattr(ws, "open", False):
@@ -310,10 +309,8 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             raise
         except Exception as e:
             logger.debug(f"{self} flush_audio skipped – unexpected error: {e}")
-    
-    
-    async def flush_audio_to_ignore(self):
 
+    async def flush_audio_to_ignore(self):
         if self._started:
             logger.debug("Flushing to ignore")
             self._started = False
@@ -322,9 +319,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
         if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
-
             await self.flush_audio_to_ignore()
-
             self._started = False
             if isinstance(frame, TTSStoppedFrame):
                 await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
@@ -412,12 +407,16 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
 
     async def _receive_messages(self):
         async for message in self._get_websocket():
-            logger.debug("Recieving message")
-            if not self._started: 
-                logger.debug("Ignoring message, not started")
-                continue
-            logger.debug('Message not Ignored')
+            logger.debug("Receiving message")
+            # Always parse message to consume it from the socket
             msg = json.loads(message)
+
+            # But only process if we're started
+            if not self._started:
+                logger.debug("Ignoring message, not started (but still consuming from socket)")
+                continue
+
+            logger.debug('Message not Ignored')
             if msg.get("audio"):
                 logger.debug('Message has Audio')
                 await self.stop_ttfb_metrics()
@@ -494,7 +493,8 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
                 # If it's a fatal error, don't try to reconnect
                 if not is_fatal:
                     await self._connect()
-                return
+                else:
+                    return
             yield None
         except Exception as e:
             error_msg = str(e)

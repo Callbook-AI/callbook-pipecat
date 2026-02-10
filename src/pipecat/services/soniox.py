@@ -24,6 +24,7 @@ from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     StartFrame,
     StartInterruptionFrame,
+    StopTaskFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
@@ -156,6 +157,15 @@ class SonioxSTTService(STTService):
         logger.info(f"  Allow interruptions: {self._allow_stt_interruptions}")
         logger.info(f"  Detect voicemail: {self.detect_voicemail}")
         logger.info(f"  No punctuation timeout: {self._on_no_punctuation_seconds}s")
+
+    def get_allow_interruptions(self) -> bool:
+        """Get the current allow_interruptions setting."""
+        return self._allow_stt_interruptions
+
+    def set_allow_interruptions(self, value: bool):
+        """Set the allow_interruptions setting."""
+        logger.debug(f"SonioxSTTService: set_allow_interruptions({value})")
+        self._allow_stt_interruptions = value
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -372,8 +382,10 @@ class SonioxSTTService(STTService):
             logger.error("  4. API endpoint URL incorrect")
             logger.error("  5. Account not active or insufficient credits")
             logger.error("=" * 70)
-            await self.push_error(ErrorFrame(f"Soniox connection failed: {e}"))
-            
+            # FATAL: Connection failed - terminate pipeline to prevent TTS waste
+            await self.push_error(ErrorFrame(f"Soniox connection failed: {e}", fatal=True))
+            await self._terminate_pipeline("STT connection failed - HTTP status error")
+
         except websockets.exceptions.InvalidURI as e:
             logger.error("=" * 70)
             logger.error("❌ SONIOX CONNECTION FAILED - INVALID URI")
@@ -381,8 +393,10 @@ class SonioxSTTService(STTService):
             logger.error(f"URI Error: {e}")
             logger.error(f"Attempted URI: {uri if 'uri' in locals() else 'Not constructed'}")
             logger.error("=" * 70)
-            await self.push_error(ErrorFrame(f"Soniox invalid URI: {e}"))
-            
+            # FATAL: Connection failed - terminate pipeline to prevent TTS waste
+            await self.push_error(ErrorFrame(f"Soniox invalid URI: {e}", fatal=True))
+            await self._terminate_pipeline("STT connection failed - invalid URI")
+
         except Exception as e:
             logger.error("=" * 70)
             logger.error("❌ SONIOX CONNECTION FAILED - UNEXPECTED ERROR")
@@ -392,7 +406,9 @@ class SonioxSTTService(STTService):
             logger.error(f"API Key (masked): {self._api_key[:10]}...{self._api_key[-4:] if len(self._api_key) > 14 else '****'}")
             logger.exception("Full traceback:")
             logger.error("=" * 70)
-            await self.push_error(ErrorFrame(f"Soniox connection failed: {e}"))
+            # FATAL: Connection failed - terminate pipeline to prevent TTS waste
+            await self.push_error(ErrorFrame(f"Soniox connection failed: {e}", fatal=True))
+            await self._terminate_pipeline("STT connection failed - unexpected error")
 
     async def _disconnect(self):
         """Disconnect from Soniox service and clean up resources."""
@@ -447,6 +463,27 @@ class SonioxSTTService(STTService):
         logger.info("⏳ Waiting 1 second before reconnection attempt...")
         await asyncio.sleep(1)
         await self._connect()
+
+    async def _terminate_pipeline(self, reason: str):
+        """Terminate the pipeline by pushing StopTaskFrame.
+
+        This is called when STT connection fails to prevent the pipeline
+        from continuing to consume TTS credits without functional STT.
+
+        Args:
+            reason: Human-readable reason for termination
+        """
+        logger.error("=" * 70)
+        logger.error("🛑 TERMINATING PIPELINE DUE TO STT FAILURE")
+        logger.error(f"   Reason: {reason}")
+        logger.error("   This prevents unnecessary TTS (ElevenLabs) credit consumption")
+        logger.error("=" * 70)
+
+        # Push StopTaskFrame to signal pipeline termination
+        # This will be caught by the pipeline runner and trigger graceful shutdown
+        await self.push_frame(StopTaskFrame())
+
+        logger.info("✅ StopTaskFrame pushed - pipeline will terminate")
 
     async def _receive_task_handler(self):
         """Handle incoming transcription messages from Soniox."""
@@ -743,6 +780,11 @@ class SonioxSTTService(STTService):
         Deepgram compatibility: This is the critical method that sends frames in the correct order:
         1. All accumulated TranscriptionFrames
         2. UserStoppedSpeakingFrame (to signal end of user speech)
+
+        Note: We do NOT call _handle_user_speaking() here because it was already called
+        in _on_final_transcript_message() before accumulating. Calling it again would
+        trigger a second StartInterruptionFrame which causes pipeline task cancellations
+        and race conditions that can lose the transcription frames.
         """
         if not len(self._accum_transcription_frames):
             logger.debug("No accumulated transcriptions to send")
@@ -753,7 +795,12 @@ class SonioxSTTService(STTService):
         logger.info(f"   Frame count: {len(self._accum_transcription_frames)}")
         logger.info("=" * 70)
 
-        await self._handle_user_speaking()
+        # Note: _handle_user_speaking() was already called in _on_final_transcript_message()
+        # which triggered the StartInterruptionFrame. We only call it here as a fallback
+        # if user is not marked as speaking (edge case from async timeout handler).
+        if not self._user_speaking:
+            logger.debug("⚠️  User not marked as speaking, triggering user speaking state")
+            await self._handle_user_speaking()
 
         # Send all accumulated transcription frames
         for frame in self._accum_transcription_frames:
@@ -927,21 +974,25 @@ class SonioxSTTService(STTService):
     async def _handle_user_speaking(self):
         """Handle user started speaking event.
 
-        Deepgram compatibility: Always push StartInterruptionFrame first,
-        then check if already speaking before pushing UserStartedSpeakingFrame.
+        Push StartInterruptionFrame and UserStartedSpeakingFrame only when user
+        is NOT already marked as speaking. This prevents multiple interruption
+        cycles that can cause pipeline task cancellation race conditions.
         """
-        # Always push StartInterruptionFrame (Deepgram does this even if already speaking)
-        await self.push_frame(StartInterruptionFrame())
-
         if self._user_speaking:
-            logger.debug("👤 User already marked as speaking, skipping UserStartedSpeakingFrame")
+            logger.debug("👤 User already marked as speaking, skipping interruption frames")
             return
+
+        # CRITICAL: Set flag IMMEDIATELY to prevent race conditions
+        # Multiple concurrent calls can happen within milliseconds, and if we
+        # set this flag after the await, both calls will pass the check above
+        self._user_speaking = True
 
         logger.info("=" * 70)
         logger.info("👤 USER STARTED SPEAKING")
         logger.info("=" * 70)
 
-        self._user_speaking = True
+        # Push interruption frames AFTER setting the flag
+        await self.push_frame(StartInterruptionFrame())
         await self.push_frame(UserStartedSpeakingFrame())
 
         logger.info("✓ User speaking state activated")
@@ -957,14 +1008,15 @@ class SonioxSTTService(STTService):
             logger.debug("👤 User already marked as not speaking, skipping")
             return
 
+        # CRITICAL: Set flags IMMEDIATELY to prevent race conditions
+        self._user_speaking = False
+        self._current_speech_start_time = None
+
         logger.info("=" * 70)
         logger.info("👤 USER STOPPED SPEAKING")
         logger.info("=" * 70)
 
-        self._user_speaking = False
-        self._current_speech_start_time = None
-
-        # Push without explicit direction (default DOWNSTREAM, matching Deepgram)
+        # Push frame AFTER setting flags
         await self.push_frame(UserStoppedSpeakingFrame())
 
         logger.info("✓ User silence state activated")
@@ -1022,9 +1074,12 @@ class SonioxSTTService(STTService):
             logger.debug(f"Ignoring transcript: bot speaking and interruptions disabled: '{transcript}'")
             return True
 
-        # Check 6: Single word + bot speaking (prevent false interruptions)
-        if self._bot_speaking and self._transcript_words_count(transcript) == 1:
-            logger.debug(f"Ignoring single-word transcript while bot speaking: '{transcript}'")
+        # Check 6: Short transcripts + bot speaking (prevent false interruptions)
+        # Block transcripts with 2 or fewer words OR less than 15 characters
+        word_count = self._transcript_words_count(transcript)
+        char_count = len(transcript.strip())
+        if self._bot_speaking and (word_count <= 2 or char_count < 15):
+            logger.debug(f"Ignoring short transcript while bot speaking: '{transcript}' (words={word_count}, chars={char_count})")
             return True
 
         return False
