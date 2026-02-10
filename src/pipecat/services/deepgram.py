@@ -1607,6 +1607,7 @@ class DeepgramSTTService(STTService):
 
         try:
             result: LiveResultResponse = kwargs["result"]
+            logger.debug(result)
 
             # Early return if no alternatives
             if not result.channel.alternatives:
