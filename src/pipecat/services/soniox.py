@@ -149,6 +149,9 @@ class SonioxSTTService(STTService):
         self._accum_transcription_frames = []  # Accumulate TranscriptionFrame objects
         self._last_time_accum_transcription = time.time()
 
+        # Diarization tracking: detect if Soniox ever sees a speaker other than "1"
+        self._diarization_detected = False
+
         self.start_time = time.time()
         self._last_time_transcription = time.time()
 
@@ -157,6 +160,11 @@ class SonioxSTTService(STTService):
         logger.info(f"  Allow interruptions: {self._allow_stt_interruptions}")
         logger.info(f"  Detect voicemail: {self.detect_voicemail}")
         logger.info(f"  No punctuation timeout: {self._on_no_punctuation_seconds}s")
+
+    @property
+    def diarization_detected(self) -> bool:
+        """Whether Soniox detected a speaker other than '1' during the call."""
+        return self._diarization_detected
 
     def get_allow_interruptions(self) -> bool:
         """Get the current allow_interruptions setting."""
@@ -632,6 +640,12 @@ class SonioxSTTService(STTService):
             text = token.get("text", "")
             if not text or text == "<end>":
                 continue
+
+            # Track diarization: detect if any token has a speaker other than "1"
+            speaker = token.get("speaker")
+            if not self._diarization_detected and speaker and speaker != "1":
+                self._diarization_detected = True
+                logger.info(f"🔊 Diarization detected: speaker '{speaker}' found in token '{text}'")
 
             # Track ANY token to prevent premature timeout
             self._last_any_token_time = time.time()
