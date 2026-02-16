@@ -5,10 +5,25 @@
 #
 
 import asyncio
+import os
+import time
 from typing import Any, Dict, Mapping
 
 import numpy as np
 from loguru import logger
+
+_PROFILING = os.environ.get("CALLBOOK_PROFILING", "0") == "1"
+_profiler = None
+
+def _get_profiler():
+    global _profiler
+    if _profiler is None:
+        try:
+            from profiling.call_profiler import CallProfiler
+            _profiler = CallProfiler.get()
+        except Exception:
+            _profiler = False
+    return _profiler if _profiler else None
 
 from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
 from pipecat.frames.frames import MixerControlFrame, MixerEnableFrame, MixerUpdateSettingsFrame
@@ -123,6 +138,9 @@ class SoundfileMixer(BaseAudioMixer):
         if not self._mixing or not self._current_sound in self._sounds:
             return audio
 
+        if _PROFILING:
+            _t0 = time.monotonic()
+
         audio_np = np.frombuffer(audio, dtype=np.int16)
         chunk_size = len(audio_np)
 
@@ -143,4 +161,9 @@ class SoundfileMixer(BaseAudioMixer):
 
         mixed_audio = np.clip(audio_np + sound_np * self._volume, -32768, 32767).astype(np.int16)
 
-        return mixed_audio.astype(np.int16).tobytes()
+        result = mixed_audio.astype(np.int16).tobytes()
+        if _PROFILING:
+            _p = _get_profiler()
+            if _p:
+                _p.record("soundfile_mixer_mix", (time.monotonic() - _t0) * 1000)
+        return result
