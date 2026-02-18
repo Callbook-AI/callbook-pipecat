@@ -750,7 +750,8 @@ class SonioxSTTService(STTService):
                 combined_text,
                 is_final=False,  # This is an interim (not endpoint)
                 confidence=confidence,
-                time_start=time_start
+                time_start=time_start,
+                tokens=all_tokens
             )
             if not should_ignore:
                 await self._on_interim_transcript_message(combined_text, self._language)
@@ -905,7 +906,8 @@ class SonioxSTTService(STTService):
             transcript,
             is_final=True,
             confidence=confidence,
-            time_start=time_start
+            time_start=time_start,
+            tokens=self._final_tokens
         )
         if should_ignore:
             logger.info("=" * 70)
@@ -1099,7 +1101,7 @@ class SonioxSTTService(STTService):
             logger.info(f"🤖 {self}: Bot first utterance ended - will identify user speaker from next speech")
         logger.debug(f"🤖 {self}: Bot stopped speaking")
 
-    async def _should_ignore_transcription(self, transcript: str, is_final: bool, confidence: float = 1.0, time_start: float = 0) -> bool:
+    async def _should_ignore_transcription(self, transcript: str, is_final: bool, confidence: float = 1.0, time_start: float = 0, tokens: List[Dict] = None) -> bool:
         """Check if transcription should be ignored based on various conditions.
 
         Filters include: speaker-based filtering, post-bot grace period,
@@ -1110,12 +1112,13 @@ class SonioxSTTService(STTService):
             is_final: Whether this is a final transcript
             confidence: Confidence score (0.0 to 1.0)
             time_start: Start time of the transcript
+            tokens: The actual tokens being evaluated (final + non-final for interims, final for endpoints)
 
         Returns:
             True if transcript should be ignored, False otherwise
         """
         # Check 1: Speaker-based filtering (most reliable signal)
-        if self._should_ignore_by_speaker():
+        if self._should_ignore_by_speaker(tokens):
             logger.debug(f"Ignoring transcript from non-user speaker: '{transcript}'")
             return True
 
@@ -1164,17 +1167,21 @@ class SonioxSTTService(STTService):
 
         return False
 
-    def _should_ignore_by_speaker(self) -> bool:
-        """Check if the current accumulated tokens should be ignored based on speaker ID.
+    def _should_ignore_by_speaker(self, tokens: List[Dict] = None) -> bool:
+        """Check if the current tokens should be ignored based on speaker ID.
 
-        Once the user speaker is identified, any transcript where the majority
-        of tokens come from a different speaker is filtered out.
+        Once the user speaker is identified, any transcript where all
+        tokens come from a different speaker is filtered out.
+
+        Args:
+            tokens: The tokens to check. For interims this is final_tokens + non_final_tokens,
+                    for endpoints this is final_tokens. Falls back to self._final_tokens if None.
         """
         if not self._user_speaker_id:
             return False
 
-        # Check the speaker of accumulated final tokens
-        tokens_to_check = self._final_tokens if self._final_tokens else []
+        # Use passed tokens, fall back to accumulated final tokens
+        tokens_to_check = tokens if tokens else self._final_tokens
         if not tokens_to_check:
             return False
 
