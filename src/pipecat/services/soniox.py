@@ -122,6 +122,7 @@ class SonioxSTTService(STTService):
         self._bot_speaking = True  # Start as True like Deepgram
         self._bot_has_ever_spoken = False  # Track if bot has spoken at least once
         self._bot_started_speaking_time = None  # Track when bot started speaking
+        self._bot_stopped_speaking_time = None  # Track when bot stopped (for echo tail grace period)
         self._vad_active = False
         self._vad_inactive_time = None
 
@@ -647,6 +648,11 @@ class SonioxSTTService(STTService):
                 self._diarization_detected = True
                 logger.info(f"🔊 Diarization detected: speaker '{speaker}' found in token '{text}'")
 
+            # Log token confidence during bot speech for echo analysis
+            confidence = token.get("confidence", 0)
+            if self._bot_speaking or self._in_post_bot_grace_period():
+                logger.info(f"🔍 Token while bot active: '{text}' confidence={confidence:.2f} speaker='{speaker}' final={token.get('is_final')}")
+
             # Track ANY token to prevent premature timeout
             self._last_any_token_time = time.time()
 
@@ -1041,18 +1047,37 @@ class SonioxSTTService(STTService):
         self._bot_speaking = True
         self._bot_has_ever_spoken = True
         self._bot_started_speaking_time = time.time()
+        self._bot_stopped_speaking_time = None  # Reset - bot is speaking now
         logger.debug(f"🤖 {self}: Bot started speaking at {self._bot_started_speaking_time}")
 
     async def _handle_bot_silence(self):
         """Handle bot stopped speaking event."""
         self._bot_speaking = False
         self._bot_started_speaking_time = None
+        self._bot_stopped_speaking_time = time.time()  # Track for echo tail grace period
         logger.debug(f"🤖 {self}: Bot stopped speaking")
+
+    # Confidence thresholds for echo rejection
+    CONFIDENCE_INTERIM_MIN = 0.7       # Minimum confidence for interims (general)
+    CONFIDENCE_BOT_SPEAKING_MIN = 0.80  # Minimum confidence while bot is speaking (echo rejection)
+    CONFIDENCE_POST_BOT_MIN = 0.80      # Minimum confidence in grace period after bot stops
+    POST_BOT_GRACE_SECONDS = 1.0        # Grace period after bot stops (catches echo tail)
+
+    def _in_post_bot_grace_period(self) -> bool:
+        """Check if we're within the grace period after the bot stopped speaking.
+        Echo tail can finalize right after bot stops — this catches it.
+        """
+        if not self._bot_stopped_speaking_time:
+            return False
+        if self._bot_speaking:
+            return False
+        return (time.time() - self._bot_stopped_speaking_time) < self.POST_BOT_GRACE_SECONDS
 
     async def _should_ignore_transcription(self, transcript: str, is_final: bool, confidence: float = 1.0, time_start: float = 0) -> bool:
         """Check if transcription should be ignored based on various conditions.
 
-        Deepgram compatibility: Enhanced to match all of Deepgram's filtering logic.
+        Uses confidence-based filtering to reject phone echo while bot is speaking.
+        Echo audio is degraded (phone network round-trip) so Soniox gives it lower confidence.
 
         Args:
             transcript: The transcript text
@@ -1063,38 +1088,61 @@ class SonioxSTTService(STTService):
         Returns:
             True if transcript should be ignored, False otherwise
         """
-        # Check 1: Low confidence interims (Deepgram threshold: 0.7)
-        if not is_final and confidence < 0.7:
-            logger.debug(f"Ignoring interim due to low confidence: {confidence:.2f} < 0.7: '{transcript}'")
-            return True
-
-        # Check 2: Fast greetings at start
-        if self._should_ignore_fast_greeting(transcript, time_start):
-            logger.debug(f"Ignoring fast greeting at start: '{transcript}'")
-            return True
-
-        # Check 3: Repeated first message
-        if self._should_ignore_first_repeated_message(transcript):
-            logger.debug(f"Ignoring repeated first message: '{transcript}'")
-            return True
-
-        # Check 4: VAD inactive + interim (don't process interims when VAD is inactive)
-        if not self._vad_active and not is_final:
-            logger.debug(f"Ignoring interim - VAD inactive: '{transcript}'")
-            return True
-
-        # Check 5: Bot speaking + no interruptions allowed
-        if self._bot_speaking and not self._allow_stt_interruptions:
-            logger.debug(f"Ignoring transcript: bot speaking and interruptions disabled: '{transcript}'")
-            return True
-
-        # Check 6: Short transcripts + bot speaking (prevent false interruptions)
-        # Block transcripts with 2 or fewer words OR less than 15 characters
         word_count = self._transcript_words_count(transcript)
         char_count = len(transcript.strip())
-        if self._bot_speaking and (word_count <= 2 or char_count < 15):
-            logger.debug(f"Ignoring short transcript while bot speaking: '{transcript}' (words={word_count}, chars={char_count})")
+        is_during_bot = self._bot_speaking
+        is_post_bot = self._in_post_bot_grace_period()
+
+        # Check 1: Low confidence interims (general baseline)
+        if not is_final and confidence < self.CONFIDENCE_INTERIM_MIN:
+            logger.debug(f"🔇 Ignoring interim, low confidence: {confidence:.2f} < {self.CONFIDENCE_INTERIM_MIN}: '{transcript}'")
             return True
+
+        # Check 2: Bot speaking — require HIGH confidence to interrupt (echo rejection)
+        # Phone echo goes through: bot speaker → phone mic → phone network → Soniox
+        # This degrades audio quality, so echo gets lower confidence than real user speech
+        if is_during_bot:
+            if confidence < self.CONFIDENCE_BOT_SPEAKING_MIN:
+                logger.info(f"🔇 Echo rejected (bot speaking): confidence {confidence:.2f} < {self.CONFIDENCE_BOT_SPEAKING_MIN}, '{transcript}'")
+                return True
+            # Also require substantial text to interrupt (short echo fragments)
+            if word_count <= 3 or char_count < 20:
+                logger.info(f"🔇 Echo rejected (bot speaking, too short): words={word_count}, chars={char_count}, '{transcript}'")
+                return True
+
+        # Check 3: Post-bot grace period — echo tail that finalizes right after bot stops
+        if is_post_bot:
+            time_since = time.time() - self._bot_stopped_speaking_time
+            if confidence < self.CONFIDENCE_POST_BOT_MIN:
+                logger.info(f"🔇 Echo tail rejected ({time_since:.1f}s after bot): confidence {confidence:.2f} < {self.CONFIDENCE_POST_BOT_MIN}, '{transcript}'")
+                return True
+            if word_count <= 2 or char_count < 15:
+                logger.info(f"🔇 Echo tail rejected ({time_since:.1f}s after bot, too short): words={word_count}, chars={char_count}, '{transcript}'")
+                return True
+
+        # Check 4: Fast greetings at start
+        if self._should_ignore_fast_greeting(transcript, time_start):
+            logger.debug(f"🔇 Ignoring fast greeting at start: '{transcript}'")
+            return True
+
+        # Check 5: Repeated first message
+        if self._should_ignore_first_repeated_message(transcript):
+            logger.debug(f"🔇 Ignoring repeated first message: '{transcript}'")
+            return True
+
+        # Check 6: VAD inactive + interim (don't process interims when VAD is inactive)
+        if not self._vad_active and not is_final:
+            logger.debug(f"🔇 Ignoring interim - VAD inactive: '{transcript}'")
+            return True
+
+        # Check 7: Bot speaking + no interruptions allowed
+        if self._bot_speaking and not self._allow_stt_interruptions:
+            logger.debug(f"🔇 Ignoring transcript: bot speaking and interruptions disabled: '{transcript}'")
+            return True
+
+        # Log accepted transcripts with confidence for tuning
+        if is_during_bot or is_post_bot:
+            logger.info(f"✅ Accepted transcript (confidence={confidence:.2f}, words={word_count}, bot_speaking={is_during_bot}, post_bot={is_post_bot}): '{transcript}'")
 
         return False
 
