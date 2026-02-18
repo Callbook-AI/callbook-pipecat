@@ -688,8 +688,8 @@ class SonioxSTTService(STTService):
 
         Logic:
         - While bot is speaking: any speaker heard is bot echo
-        - After bot's first utterance ends: first NEW speaker (not in echo set) = user
-        - Once user is identified, all other speakers are filtered
+        - After bot stops speaking: first NEW speaker (not in echo set) = user
+        - Re-identifies user after each bot utterance (Soniox may reassign speaker IDs)
         """
         if self._bot_speaking:
             # Anything heard while bot is speaking is echo
@@ -1089,6 +1089,9 @@ class SonioxSTTService(STTService):
         self._bot_has_ever_spoken = True
         self._bot_started_speaking_time = time.time()
         self._bot_stopped_speaking_time = None  # Reset - bot is speaking now
+        # Clear echo speaker IDs for fresh tracking during this utterance
+        # Soniox may reassign speaker IDs between utterances
+        self._bot_echo_speaker_ids.clear()
         logger.debug(f"🤖 {self}: Bot started speaking at {self._bot_started_speaking_time}")
 
     async def _handle_bot_silence(self):
@@ -1099,6 +1102,13 @@ class SonioxSTTService(STTService):
         if not self._bot_first_utterance_ended:
             self._bot_first_utterance_ended = True
             logger.info(f"🤖 {self}: Bot first utterance ended - will identify user speaker from next speech")
+        else:
+            # Reset user speaker ID after each bot utterance (not just the first)
+            # Soniox may reassign speaker IDs between utterances, so we must
+            # re-identify the user from fresh speech each time
+            if self._user_speaker_id:
+                logger.info(f"🔄 Resetting user speaker ID '{self._user_speaker_id}' - will re-identify from next speech")
+                self._user_speaker_id = None
         logger.debug(f"🤖 {self}: Bot stopped speaking")
 
     async def _should_ignore_transcription(self, transcript: str, is_final: bool, confidence: float = 1.0, time_start: float = 0, tokens: List[Dict] = None) -> bool:
