@@ -152,6 +152,15 @@ class SonioxSTTService(STTService):
         # Diarization tracking: detect if Soniox ever sees a speaker other than "1"
         self._diarization_detected = False
 
+        # Speaker filtering: identify the real user vs bot echo / background voices
+        self._bot_echo_speaker_ids = set()  # Speaker IDs heard while bot is speaking (echo)
+        self._user_speaker_id = None  # The confirmed user speaker ID
+        self._bot_first_utterance_ended = False  # Whether bot's first utterance has finished
+        self._bot_stopped_speaking_time = None  # When bot last stopped speaking (for grace period)
+
+        # Grace period after bot stops speaking (in seconds)
+        self._post_bot_grace_seconds = 0.8
+
         self.start_time = time.time()
         self._last_time_transcription = time.time()
 
@@ -165,6 +174,16 @@ class SonioxSTTService(STTService):
     def diarization_detected(self) -> bool:
         """Whether Soniox detected a speaker other than '1' during the call."""
         return self._diarization_detected
+
+    @property
+    def user_speaker_id(self) -> Optional[str]:
+        """The identified user speaker ID, or None if not yet identified."""
+        return self._user_speaker_id
+
+    @property
+    def bot_echo_speaker_ids(self) -> set:
+        """Set of speaker IDs identified as bot echo."""
+        return self._bot_echo_speaker_ids
 
     def get_allow_interruptions(self) -> bool:
         """Get the current allow_interruptions setting."""
@@ -629,6 +648,7 @@ class SonioxSTTService(STTService):
 
     def _separate_tokens(self, tokens: List[Dict]) -> tuple[List[Dict], bool]:
         """Separate tokens into final and non-final, filtering out empty/end tokens.
+        Also tracks speaker IDs for bot echo vs user identification.
 
         Returns:
             Tuple of (non_final_tokens, has_final)
@@ -647,6 +667,10 @@ class SonioxSTTService(STTService):
                 self._diarization_detected = True
                 logger.info(f"🔊 Diarization detected: speaker '{speaker}' found in token '{text}'")
 
+            # Speaker tracking for filtering
+            if speaker:
+                self._track_speaker(speaker, text)
+
             # Track ANY token to prevent premature timeout
             self._last_any_token_time = time.time()
 
@@ -658,6 +682,27 @@ class SonioxSTTService(STTService):
                 non_final_tokens.append(token)
 
         return non_final_tokens, has_final
+
+    def _track_speaker(self, speaker: str, text: str):
+        """Track speaker IDs to identify bot echo vs real user.
+
+        Logic:
+        - While bot is speaking: any speaker heard is bot echo
+        - After bot's first utterance ends: first NEW speaker (not in echo set) = user
+        - Once user is identified, all other speakers are filtered
+        """
+        if self._bot_speaking:
+            # Anything heard while bot is speaking is echo
+            if speaker not in self._bot_echo_speaker_ids:
+                self._bot_echo_speaker_ids.add(speaker)
+                logger.info(f"🔇 Speaker '{speaker}' tagged as bot echo (heard during bot speech, token: '{text}')")
+        elif self._bot_first_utterance_ended and not self._user_speaker_id:
+            # Bot has spoken and stopped — first new speaker is the user
+            if speaker not in self._bot_echo_speaker_ids:
+                self._user_speaker_id = speaker
+                logger.info(f"🎯 Speaker '{speaker}' identified as USER (first new speaker after bot, token: '{text}')")
+            else:
+                logger.debug(f"🔇 Speaker '{speaker}' is known bot echo, still waiting for user speaker")
 
     def _build_transcript_texts(self, non_final_tokens: List[Dict]) -> tuple[str, str, str]:
         """Build final, non-final, and combined transcript texts.
@@ -1041,18 +1086,24 @@ class SonioxSTTService(STTService):
         self._bot_speaking = True
         self._bot_has_ever_spoken = True
         self._bot_started_speaking_time = time.time()
+        self._bot_stopped_speaking_time = None  # Reset - bot is speaking now
         logger.debug(f"🤖 {self}: Bot started speaking at {self._bot_started_speaking_time}")
 
     async def _handle_bot_silence(self):
         """Handle bot stopped speaking event."""
         self._bot_speaking = False
         self._bot_started_speaking_time = None
+        self._bot_stopped_speaking_time = time.time()  # Track for grace period
+        if not self._bot_first_utterance_ended:
+            self._bot_first_utterance_ended = True
+            logger.info(f"🤖 {self}: Bot first utterance ended - will identify user speaker from next speech")
         logger.debug(f"🤖 {self}: Bot stopped speaking")
 
     async def _should_ignore_transcription(self, transcript: str, is_final: bool, confidence: float = 1.0, time_start: float = 0) -> bool:
         """Check if transcription should be ignored based on various conditions.
 
-        Deepgram compatibility: Enhanced to match all of Deepgram's filtering logic.
+        Filters include: speaker-based filtering, post-bot grace period,
+        confidence, VAD state, and bot-speaking state.
 
         Args:
             transcript: The transcript text
@@ -1063,32 +1114,47 @@ class SonioxSTTService(STTService):
         Returns:
             True if transcript should be ignored, False otherwise
         """
-        # Check 1: Low confidence interims (Deepgram threshold: 0.7)
+        # Check 1: Speaker-based filtering (most reliable signal)
+        if self._should_ignore_by_speaker():
+            logger.debug(f"Ignoring transcript from non-user speaker: '{transcript}'")
+            return True
+
+        # Check 2: Post-bot grace period — short transcripts arriving right after bot stops
+        # Catches echo "tail" that finalizes after bot stops speaking
+        if self._in_post_bot_grace_period():
+            word_count = self._transcript_words_count(transcript)
+            char_count = len(transcript.strip())
+            if word_count <= 2 or char_count < 15:
+                time_since = time.time() - self._bot_stopped_speaking_time
+                logger.debug(f"Ignoring short transcript in post-bot grace period ({time_since:.0f}ms after bot stopped): '{transcript}' (words={word_count}, chars={char_count})")
+                return True
+
+        # Check 3: Low confidence interims (Deepgram threshold: 0.7)
         if not is_final and confidence < 0.7:
             logger.debug(f"Ignoring interim due to low confidence: {confidence:.2f} < 0.7: '{transcript}'")
             return True
 
-        # Check 2: Fast greetings at start
+        # Check 4: Fast greetings at start
         if self._should_ignore_fast_greeting(transcript, time_start):
             logger.debug(f"Ignoring fast greeting at start: '{transcript}'")
             return True
 
-        # Check 3: Repeated first message
+        # Check 5: Repeated first message
         if self._should_ignore_first_repeated_message(transcript):
             logger.debug(f"Ignoring repeated first message: '{transcript}'")
             return True
 
-        # Check 4: VAD inactive + interim (don't process interims when VAD is inactive)
+        # Check 6: VAD inactive + interim (don't process interims when VAD is inactive)
         if not self._vad_active and not is_final:
             logger.debug(f"Ignoring interim - VAD inactive: '{transcript}'")
             return True
 
-        # Check 5: Bot speaking + no interruptions allowed
+        # Check 7: Bot speaking + no interruptions allowed
         if self._bot_speaking and not self._allow_stt_interruptions:
             logger.debug(f"Ignoring transcript: bot speaking and interruptions disabled: '{transcript}'")
             return True
 
-        # Check 6: Short transcripts + bot speaking (prevent false interruptions)
+        # Check 8: Short transcripts + bot speaking (prevent false interruptions)
         # Block transcripts with 2 or fewer words OR less than 15 characters
         word_count = self._transcript_words_count(transcript)
         char_count = len(transcript.strip())
@@ -1097,6 +1163,46 @@ class SonioxSTTService(STTService):
             return True
 
         return False
+
+    def _should_ignore_by_speaker(self) -> bool:
+        """Check if the current accumulated tokens should be ignored based on speaker ID.
+
+        Once the user speaker is identified, any transcript where the majority
+        of tokens come from a different speaker is filtered out.
+        """
+        if not self._user_speaker_id:
+            return False
+
+        # Check the speaker of accumulated final tokens
+        tokens_to_check = self._final_tokens if self._final_tokens else []
+        if not tokens_to_check:
+            return False
+
+        # Count tokens by speaker
+        user_tokens = 0
+        other_tokens = 0
+        for token in tokens_to_check:
+            speaker = token.get("speaker")
+            if speaker == self._user_speaker_id:
+                user_tokens += 1
+            elif speaker:
+                other_tokens += 1
+
+        # If majority of tokens are NOT from the user, ignore
+        if other_tokens > 0 and user_tokens == 0:
+            speakers = set(t.get("speaker", "?") for t in tokens_to_check)
+            logger.info(f"🔇 Filtering transcript: speakers {speakers} != user '{self._user_speaker_id}'")
+            return True
+
+        return False
+
+    def _in_post_bot_grace_period(self) -> bool:
+        """Check if we're within the grace period after the bot stopped speaking."""
+        if not self._bot_stopped_speaking_time:
+            return False
+        if self._bot_speaking:
+            return False
+        return (time.time() - self._bot_stopped_speaking_time) < self._post_bot_grace_seconds
 
     def _time_since_init(self):
         """Get time since service initialization."""
