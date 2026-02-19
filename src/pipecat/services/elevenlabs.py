@@ -379,8 +379,7 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
             }
             if self._voice_settings:
                 msg["voice_settings"] = self._voice_settings
-            logger.debug(msg["voice_settings"])
-            
+
             await self._websocket.send(json.dumps(msg))
         except Exception as e:
             logger.error(f"{self} initialization error: {e}")
@@ -408,12 +407,12 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
     async def _receive_messages(self):
         async for message in self._get_websocket():
             logger.debug("Receiving message")
-            # Always parse message to consume it from the socket
+            # Always parse message to consume it from the socket (prevents buffer overflow)
             msg = json.loads(message)
 
-            # But only process if we're started
+            # Only process if we're started (but we still consumed the message above)
             if not self._started:
-                logger.debug("Ignoring message, not started (but still consuming from socket)")
+                logger.debug("Ignoring message, not started (but consumed from socket to prevent buffer overflow)")
                 continue
 
             logger.debug('Message not Ignored')
@@ -447,7 +446,6 @@ class ElevenLabsTTSService(InterruptibleWordTTSService):
         if self._websocket:
             msg = {"text": text + " "}
             logger.debug(f"{self}::Sending websocket msg: { msg }")
-            #self._bot_speaking = True
             await self._websocket.send(json.dumps(msg))
 
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
