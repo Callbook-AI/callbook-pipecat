@@ -202,7 +202,7 @@ class TestInworldWebSocket(unittest.IsolatedAsyncioTestCase):
         await self._start_service(tts)
 
         _, kwargs = mock_connect.call_args
-        headers = kwargs.get("additional_headers", {})
+        headers = kwargs.get("extra_headers", {})
         assert headers["authorization"] == "Basic my-secret-key"
 
         await tts._disconnect()

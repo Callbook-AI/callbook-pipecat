@@ -174,7 +174,7 @@ class InworldTTSService(InterruptibleWordTTSService):
 
             self._websocket = await websockets.connect(
                 ws_url,
-                additional_headers={"authorization": f"Basic {self._api_key}"},
+                extra_headers={"authorization": f"Basic {self._api_key}"},
                 max_size=16 * 1024 * 1024,
             )
 
