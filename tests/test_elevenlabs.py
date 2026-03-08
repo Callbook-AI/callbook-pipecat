@@ -44,6 +44,7 @@ class FakeWebSocket:
         self.messages = messages or []
         self.sent: List[str] = []
         self.closed = False
+        self.open = True
         self.state = MagicMock()
         self.close_rcvd = None
         self.close_sent = None
@@ -58,6 +59,7 @@ class FakeWebSocket:
 
     async def close(self):
         self.closed = True
+        self.open = False
 
     async def ping(self):
         pass
