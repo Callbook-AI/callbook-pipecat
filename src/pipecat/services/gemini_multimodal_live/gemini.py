@@ -7,6 +7,7 @@
 import asyncio
 import base64
 import json
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Union
@@ -220,6 +221,22 @@ class GeminiMultimodalLiveLLMService(LLMService):
             "modalities": params.modalities,
             "extra": params.extra if isinstance(params.extra, dict) else {},
         }
+        self._completion_durations = []  # List to store elapsed completion times
+        self._current_completion_start_time = None  # Track current completion start time
+
+    def get_completion_durations(self) -> List[float]:
+        """Get the list of completion durations."""
+        return self._completion_durations.copy()
+    
+    def get_average_completion_duration(self) -> float:
+        """Get the average completion duration."""
+        if not self._completion_durations:
+            return 0.0
+        return sum(self._completion_durations) / len(self._completion_durations)
+
+    def clear_completion_durations(self):
+        """Clear the list of completion durations."""
+        self._completion_durations.clear()
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -649,6 +666,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
         text = part.text
         if text:
             if not self._bot_text_buffer:
+                self._current_completion_start_time = time.perf_counter()  # Start timing
                 await self.push_frame(LLMFullResponseStartFrame())
 
             self._bot_text_buffer += text
@@ -697,6 +715,14 @@ class GeminiMultimodalLiveLLMService(LLMService):
         text = self._bot_text_buffer
         self._bot_audio_buffer = bytearray()
         self._bot_text_buffer = ""
+
+        # Calculate and store completion duration if we have a start time
+        if self._current_completion_start_time is not None:
+            elapsed = time.perf_counter() - self._current_completion_start_time
+            elapsed_formatted = round(elapsed, 3)
+            self._completion_durations.append(elapsed_formatted)  # Store the duration
+            logger.debug(f"Gemini completion duration: {elapsed_formatted}")
+            self._current_completion_start_time = None  # Reset for next completion
 
         if audio and self._transcribe_model_audio and self._context:
             await self._transcribe_model_audio_queue.put(audio)

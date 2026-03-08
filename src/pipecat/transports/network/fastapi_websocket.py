@@ -61,6 +61,8 @@ class FastAPIWebsocketClient:
         self._closing = False
         self._is_binary = is_binary
         self._callbacks = callbacks
+        self._disconnect_lock = asyncio.Lock()
+        self._is_disconnecting = False
 
     def receive(self) -> typing.AsyncIterator[bytes | str]:
         return self._websocket.iter_bytes() if self._is_binary else self._websocket.iter_text()
@@ -73,10 +75,13 @@ class FastAPIWebsocketClient:
                 await self._websocket.send_text(data)
 
     async def disconnect(self):
-        if self.is_connected and not self.is_closing:
-            self._closing = True
+        if self._is_disconnecting: 
+            return
+
+        self._is_disconnecting = True 
+        if self._websocket.client_state == WebSocketState.CONNECTED:
+            logger.debug("Closing client websocket")
             await self._websocket.close()
-            await self.trigger_client_disconnected()
 
     async def trigger_client_disconnected(self):
         await self._callbacks.on_client_disconnected(self._websocket)
@@ -169,7 +174,7 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
             await asyncio.sleep(0.01)
 
             now = time.time()
-            elapsed_since_audio_ms = (now - self._last_audio_frame_time) * 1000  # Convert to ms
+            elapsed_since_audio_ms = int(now - self._last_audio_frame_time) * 1000  # Convert to ms
             audio_bytes_10ms = int(self._params.serializer.sample_rate / 100) * 2
             
             silence = None
@@ -299,11 +304,15 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
 
     async def _write_frame(self, frame: Frame):
         try:
+            if hasattr(frame, 'audio') and self._final_audio_buffer is not None:
+                self._final_audio_buffer.extend(frame.audio)
             payload = await self._params.serializer.serialize(frame)
             if payload:
                 await self._client.send(payload)
         except Exception as e:
             logger.error(f"{self} exception sending data: {e.__class__.__name__} ({e})")
+            # Mark client as closing to prevent infinite retry loop
+            self._client._closing = True
 
     async def _write_audio_sleep(self):
         # Simulate a clock.

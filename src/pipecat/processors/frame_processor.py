@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, Coroutine, Optional, Any
 
 from loguru import logger
 import uuid
+from websockets.exceptions import ConnectionClosedOK
 
 from pipecat.clocks.base_clock import BaseClock
 from pipecat.frames.frames import (
@@ -328,9 +329,16 @@ class FrameProcessor(BaseObject):
                         self, self._prev, frame, direction, timestamp
                     )
                 await self._prev.queue_frame(frame, direction)
+        except ConnectionClosedOK as e:
+            logger.debug(f"Ignoring WebSocket closed OK in {self}: {e}")
+            return
         except Exception as e:
             logger.exception(f"Uncaught exception in {self}: {e}")
-            await self.push_error(ErrorFrame(str(e)))
+            # Don't call push_error if we're already pushing an ErrorFrame
+            # or cancelling, to prevent infinite recursion:
+            # push_error -> push_frame -> __internal_push_frame -> exception -> push_error -> ...
+            if not isinstance(frame, ErrorFrame) and not self._cancelling:
+                await self.push_error(ErrorFrame(str(e)))
             raise
 
     def _check_ready(self, frame: Frame):

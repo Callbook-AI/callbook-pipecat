@@ -10,9 +10,12 @@ from typing import Awaitable, Callable, Union
 
 from pipecat.frames.frames import (
     BotSpeakingFrame,
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     Frame,
+    LLMFullResponseStartFrame,
+    LLMFullResponseEndFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
     VADActiveFrame,
@@ -72,6 +75,7 @@ class UserIdleProcessor(FrameProcessor):
         self._conversation_started = False
         self._idle_task = None
         self._idle_event = asyncio.Event()
+        self._bot_is_responding = False  # Track if bot is generating or speaking a response
 
     def _wrap_callback(
         self,
@@ -145,8 +149,16 @@ class UserIdleProcessor(FrameProcessor):
 
         # Only process these events if conversation has started
         if self._conversation_started:
+            # Track when bot starts generating a response (LLM processing)
+            if isinstance(frame, LLMFullResponseStartFrame):
+                self._bot_is_responding = True
+                self._idle_event.set()
+            # Track when bot finishes generating a response
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                # Keep responding state true - will be cleared when bot stops speaking
+                pass
             # We shouldn't call the idle callback if the user or the bot are speaking
-            if isinstance(frame, (UserStartedSpeakingFrame, VADActiveFrame)):
+            elif isinstance(frame, (UserStartedSpeakingFrame, VADActiveFrame)):
                 self._retry_count = 0  # Reset retry count when user speaks
                 self._interrupted = True
                 self._idle_event.set()
@@ -154,6 +166,17 @@ class UserIdleProcessor(FrameProcessor):
                 self._interrupted = False
                 self._idle_event.set()
             elif isinstance(frame, BotSpeakingFrame):
+                self._bot_is_responding = True
+                self._idle_event.set()
+            elif isinstance(frame, BotStoppedSpeakingFrame):
+                self._bot_is_responding = False
+                self._idle_event.set()
+            # Ignore idle callback triggering when LLM is processing
+            elif isinstance(frame, LLMFullResponseStartFrame):
+                self._interrupted = True
+                self._idle_event.set()
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                self._interrupted = False
                 self._idle_event.set()
 
     async def cleanup(self) -> None:
@@ -171,7 +194,8 @@ class UserIdleProcessor(FrameProcessor):
             try:
                 await asyncio.wait_for(self._idle_event.wait(), timeout=self._timeout)
             except asyncio.TimeoutError:
-                if not self._interrupted:
+                # Don't trigger idle if user is speaking, bot is speaking, or bot is generating response
+                if not self._interrupted and not self._bot_is_responding:
                     self._retry_count += 1
                     should_continue = await self._callback(self, self._retry_count)
                     if not should_continue:

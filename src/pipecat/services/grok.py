@@ -11,7 +11,7 @@ from typing import Any, Mapping, Optional
 
 from loguru import logger
 
-from pipecat.frames.frames import FunctionCallResultProperties
+from pipecat.frames.frames import ErrorFrame, FunctionCallResultProperties
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.openai_llm_context import (
     OpenAILLMContext,
@@ -101,7 +101,10 @@ class GrokAssistantContextAggregator(OpenAIAssistantContextAggregator):
             await self.push_context_frame()
 
         except Exception as e:
-            logger.error(f"Error processing frame: {e}")
+            error_msg = str(e)
+            logger.error(f"Grok aggregator error processing frame: {error_msg}")
+            # Re-raise to ensure error is properly handled upstream
+            raise
 
 
 @dataclass
@@ -170,6 +173,28 @@ class GrokLLMService(OpenAILLMService):
 
         try:
             await super()._process_context(context)
+        except Exception as e:
+            # Catch and handle Grok-specific errors
+            error_msg = str(e)
+            error_msg_lower = error_msg.lower()
+
+            logger.error(f"Grok error during context processing: {error_msg}")
+
+            # Determine if error is fatal based on error message
+            is_fatal = any(keyword in error_msg_lower for keyword in [
+                'authentication', 'unauthorized', '401', '403', 'invalid', 'api key',
+                'quota', 'suspended', 'credentials', 'resource_exhausted',
+                'spending limit', 'credits', 'rate limit', 'billing'
+            ])
+
+            # Push ErrorFrame for monitoring/Slack alerts
+            await self.push_error(ErrorFrame(
+                error=f"Grok: {error_msg[:200]}",
+                fatal=is_fatal
+            ))
+
+            # Re-raise the exception
+            raise
         finally:
             self._is_processing = False
             # Report final accumulated token usage at the end of processing

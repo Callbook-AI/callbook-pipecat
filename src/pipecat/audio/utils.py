@@ -5,6 +5,7 @@
 #
 
 import audioop
+import os
 
 import numpy as np
 import pyloudnorm as pyln
@@ -15,7 +16,8 @@ from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
 
 
 def create_default_resampler(**kwargs) -> BaseAudioResampler:
-    return SOXRAudioResampler(**kwargs)
+    quality = os.environ.get("SOXR_QUALITY", "MQ")
+    return SOXRAudioResampler(quality=quality, **kwargs)
 
 
 def mix_audio(audio1: bytes, audio2: bytes) -> bytes:

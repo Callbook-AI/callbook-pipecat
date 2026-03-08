@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import os
 import time
 from typing import Optional
 
@@ -14,6 +15,19 @@ from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADParams
 
 # How often should we reset internal model state
 _MODEL_RESET_STATES_TIME = 5.0
+
+_PROFILING = os.environ.get("CALLBOOK_PROFILING", "0") == "1"
+_profiler = None
+
+def _get_profiler():
+    global _profiler
+    if _profiler is None:
+        try:
+            from profiling.call_profiler import CallProfiler
+            _profiler = CallProfiler.get()
+        except Exception:
+            _profiler = False
+    return _profiler if _profiler else None
 
 try:
     import onnxruntime
@@ -147,6 +161,7 @@ class SileroVADAnalyzer(VADAnalyzer):
 
     def voice_confidence(self, buffer) -> float:
         try:
+            _t0 = time.time()
             audio_int16 = np.frombuffer(buffer, np.int16)
             # Divide by 32768 because we have signed 16-bit data.
             audio_float32 = np.frombuffer(audio_int16, dtype=np.int16).astype(np.float32) / 32768.0
@@ -159,6 +174,11 @@ class SileroVADAnalyzer(VADAnalyzer):
             if diff_time >= _MODEL_RESET_STATES_TIME:
                 self._model.reset_states()
                 self._last_reset_time = curr_time
+
+            if _PROFILING:
+                _p = _get_profiler()
+                if _p:
+                    _p.record("silero_vad_inference", (time.time() - _t0) * 1000)
 
             return new_confidence
         except Exception as e:
