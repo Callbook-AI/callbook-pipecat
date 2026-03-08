@@ -32,7 +32,7 @@ def _context_created_response(context_id: str = "ctx-test-1") -> str:
             "contextId": context_id,
             "contextCreated": {
                 "voiceId": "test-voice",
-                "modelId": "v1.5",
+                "modelId": "inworld-tts-1.5-max",
             },
             "status": {"code": 0, "message": "OK"},
         }
@@ -160,7 +160,7 @@ class TestInworldWebSocket(unittest.IsolatedAsyncioTestCase):
         defaults = dict(
             api_key="test-api-key",
             voice_id="test-voice",
-            model="v1.5",
+            model="inworld-tts-1.5-max",
             sample_rate=16000,
         )
         defaults.update(kwargs)
@@ -450,7 +450,7 @@ class TestInworldWebSocket(unittest.IsolatedAsyncioTestCase):
         msg = tts._build_create_message()
 
         assert msg["create"]["voiceId"] == "test-voice"
-        assert msg["create"]["modelId"] == "v1.5"
+        assert msg["create"]["modelId"] == "inworld-tts-1.5-max"
         assert msg["create"]["audioConfig"]["audioEncoding"] == "LINEAR16"
         assert msg["create"]["audioConfig"]["sampleRateHertz"] == 16000
         assert msg["create"]["timestampType"] == "WORD"

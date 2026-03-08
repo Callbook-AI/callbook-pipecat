@@ -74,7 +74,7 @@ class InworldTTSService(InterruptibleWordTTSService):
         *,
         api_key: str,
         voice_id: str,
-        model: str = "v1.5",
+        model: str = "inworld-tts-1.5-max",
         url: str = "wss://api.inworld.ai",
         sample_rate: Optional[int] = None,
         params: InputParams = InputParams(),
@@ -266,7 +266,7 @@ class InworldTTSService(InterruptibleWordTTSService):
                     await self.push_frame(frame)
 
                 # Process word alignment timestamps
-                timestamp_info = chunk.get("timestampInfo", {})
+                timestamp_info = chunk.get("timestampInfo") or {}
                 word_alignment = timestamp_info.get("wordAlignment")
                 if word_alignment and word_alignment.get("words"):
                     word_times = calculate_word_times(
