@@ -82,7 +82,7 @@ class InworldTTSService(InterruptibleWordTTSService):
     ):
         super().__init__(
             aggregate_sentences=True,
-            push_text_frames=False,
+            push_text_frames=True,
             push_stop_frames=True,
             pause_frame_processing=True,
             sample_rate=sample_rate,
@@ -265,16 +265,10 @@ class InworldTTSService(InterruptibleWordTTSService):
                     frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
                     await self.push_frame(frame)
 
-                # Process word alignment timestamps
-                timestamp_info = chunk.get("timestampInfo") or {}
-                word_alignment = timestamp_info.get("wordAlignment")
-                if word_alignment and word_alignment.get("words"):
-                    word_times = calculate_word_times(
-                        word_alignment, self._cumulative_time
-                    )
-                    if word_times:
-                        await self.add_word_timestamps(word_times)
-                        self._cumulative_time = word_times[-1][1]
+                # Note: Word alignment timestamps are skipped because with
+                # push_text_frames=True, the base class pushes full sentence
+                # TTSTextFrame after each run_tts. Using word alignment here
+                # would duplicate text in the context aggregator.
 
             elif result.get("flushCompleted"):
                 logger.debug(f"Inworld flush completed for context {result.get('contextId')}")
