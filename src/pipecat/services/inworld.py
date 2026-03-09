@@ -137,11 +137,11 @@ class InworldTTSService(InterruptibleWordTTSService):
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
-        if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
+        if isinstance(frame, StartInterruptionFrame):
             await self.flush_audio_to_ignore()
             self._started = False
-            if isinstance(frame, TTSStoppedFrame):
-                await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
+        elif isinstance(frame, TTSStoppedFrame):
+            await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
 
     async def _connect(self):
         await self._connect_websocket()
