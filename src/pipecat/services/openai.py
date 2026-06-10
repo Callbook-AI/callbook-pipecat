@@ -241,10 +241,20 @@ class BaseOpenAILLMService(LLMService):
             logger.debug(f"{self}: {chunk}")
             
             if chunk.usage:
+                # prompt_tokens INCLUDES cached tokens; report the cache-hit
+                # share separately so cost tracking can bill it at the
+                # discounted cached rate.
+                prompt_details = getattr(chunk.usage, "prompt_tokens_details", None)
+                cached_tokens = (
+                    getattr(prompt_details, "cached_tokens", 0) or 0
+                    if prompt_details
+                    else 0
+                )
                 tokens = LLMTokenUsage(
                     prompt_tokens=chunk.usage.prompt_tokens,
                     completion_tokens=chunk.usage.completion_tokens,
                     total_tokens=chunk.usage.total_tokens,
+                    cache_read_input_tokens=cached_tokens,
                 )
                 await self.start_llm_usage_metrics(tokens)
 
