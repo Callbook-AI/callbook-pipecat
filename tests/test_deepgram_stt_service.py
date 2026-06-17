@@ -859,5 +859,64 @@ class TestFastResponseAccumulation(unittest.TestCase):
         self.assertEqual(len(self.stt_service._accum_transcription_frames), 3)
 
 
+class TestDisconnectReentrancy(unittest.TestCase):
+    """Regression tests for the _disconnect re-entrancy guard.
+
+    The Deepgram error path (_on_error -> _disconnect) could re-enter
+    _disconnect while it was already tearing down. Because _async_handler_task
+    was only cleared *after* awaiting its cancellation, each re-entry re-cancelled
+    the same not-yet-cleared task, recursing until a RecursionError — which the
+    broad `except` in _disconnect swallowed, leaving the pipeline teardown
+    half-done and the call wedged until the max-duration cap.
+    """
+
+    def setUp(self):
+        self.stt_service = DeepgramSTTService(api_key="test_key", sample_rate=16000)
+        self.stt_service._connection = None  # skip the websocket cleanup block
+
+    @pytest.mark.asyncio
+    async def test_reentrant_disconnect_does_not_recurse(self):
+        """Re-entry during teardown must be a no-op, not unbounded recursion."""
+        cancel_calls = {"n": 0}
+
+        async def reentrant_cancel(task):
+            cancel_calls["n"] += 1
+            # Simulate the error -> _on_error -> _disconnect re-entry.
+            await self.stt_service._disconnect()
+
+        self.stt_service._async_handler_task = object()  # truthy 'task'
+        self.stt_service.cancel_task = AsyncMock(side_effect=reentrant_cancel)
+
+        await self.stt_service._disconnect()
+
+        # Without the guard this was ~496 (recursion depth limit); with it, 1.
+        self.assertEqual(cancel_calls["n"], 1)
+        self.assertIsNone(self.stt_service._async_handler_task)
+        self.assertFalse(self.stt_service._disconnecting)
+
+    @pytest.mark.asyncio
+    async def test_disconnect_does_not_self_cancel(self):
+        """If the handler task is the current task, it must not be cancelled."""
+        self.stt_service._async_handler_task = asyncio.current_task()
+        self.stt_service.cancel_task = AsyncMock()
+
+        await self.stt_service._disconnect()
+
+        self.stt_service.cancel_task.assert_not_called()
+        self.assertIsNone(self.stt_service._async_handler_task)
+
+    @pytest.mark.asyncio
+    async def test_normal_disconnect_cancels_handler_once(self):
+        """Normal teardown cancels the handler exactly once and clears refs."""
+        self.stt_service._async_handler_task = object()
+        self.stt_service.cancel_task = AsyncMock()
+
+        await self.stt_service._disconnect()
+
+        self.assertEqual(self.stt_service.cancel_task.await_count, 1)
+        self.assertIsNone(self.stt_service._async_handler_task)
+        self.assertFalse(self.stt_service._disconnecting)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

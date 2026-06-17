@@ -704,6 +704,9 @@ class DeepgramSTTService(STTService):
         # FIX: Add debouncing for error handling to prevent race conditions
         self._reconnecting = False
         self._reconnect_lock = asyncio.Lock()
+        # Re-entrancy guard for _disconnect (prevents the error -> _on_error ->
+        # _disconnect path from recursing during teardown — see _disconnect).
+        self._disconnecting = False
 
         self._setup_sibling_deepgram()
 
@@ -1185,10 +1188,24 @@ class DeepgramSTTService(STTService):
             await self._on_error(error=e)
 
     async def _disconnect(self):
+        # Re-entrancy guard. The Deepgram error path (_on_error -> _disconnect)
+        # can fire again *while we are already disconnecting* — e.g. cancelling
+        # the handler task surfaces another connection error. Previously this
+        # recursed (each level re-cancelling the not-yet-cleared handler task)
+        # until a RecursionError, which the `except` below swallowed, leaving the
+        # pipeline teardown half-done and the call wedged until the max-duration
+        # cap. Make _disconnect idempotent and non-reentrant.
+        if self._disconnecting:
+            return
+        self._disconnecting = True
         try:
-            if self._async_handler_task:
-                await self.cancel_task(self._async_handler_task)
-                self._async_handler_task = None
+            handler_task = self._async_handler_task
+            # Clear the reference BEFORE awaiting cancellation so a re-entrant
+            # call (or a concurrent reconnect) can't grab and cancel it again.
+            self._async_handler_task = None
+            # Never cancel the task we are currently running inside of.
+            if handler_task is not None and handler_task is not asyncio.current_task():
+                await self.cancel_task(handler_task)
 
             # FIX: Check connection exists before checking is_connected to prevent AttributeError
             if self._connection is not None:
@@ -1216,6 +1233,7 @@ class DeepgramSTTService(STTService):
         finally:
             # Ensure connection is always cleared even if outer try fails
             self._connection = None
+            self._disconnecting = False
 
     async def start_metrics(self):
         await self.start_ttfb_metrics()
