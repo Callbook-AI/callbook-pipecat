@@ -1300,11 +1300,11 @@ class DeepgramSTTService(STTService):
 
     async def _handle_user_speaking(self):
 
-        await self.push_frame(StartInterruptionFrame())
         if self._user_speaking == True: return
 
         self._user_speaking = True
 
+        await self.push_frame(StartInterruptionFrame())
         await self.push_frame(UserStartedSpeakingFrame())
 
     async def _handle_user_silence(self):
@@ -1380,7 +1380,7 @@ class DeepgramSTTService(STTService):
 
         last_interim_delay = current_time - self._last_interim_time
 
-        if last_interim_delay > FALSE_INTERIM_SECONDS: return
+        if last_interim_delay <= FALSE_INTERIM_SECONDS: return
 
         logger.debug("False interim detected")
 
