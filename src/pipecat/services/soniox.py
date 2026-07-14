@@ -1269,7 +1269,7 @@ class SonioxSTTService(STTService):
 
         last_interim_delay = current_time - self._last_interim_time
 
-        if last_interim_delay > FALSE_INTERIM_SECONDS:
+        if last_interim_delay <= FALSE_INTERIM_SECONDS:
             return
 
         logger.debug("🚨 False interim detected - triggering user silence")
