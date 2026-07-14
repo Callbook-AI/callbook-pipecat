@@ -190,12 +190,19 @@ class BaseOutputTransport(FrameProcessor):
             return
 
         if isinstance(frame, StartInterruptionFrame):
-            # Cancel sink and camera tasks.
-            await self._cancel_sink_tasks()
+            # Drop queued playout without restarting the sink tasks. Keeping the
+            # audio sink alive avoids an RTP gap that carriers can conceal by
+            # repeating the last packet as a short burst of distorted audio.
+            while not self._sink_queue.empty():
+                self._sink_queue.get_nowait()
+                self._sink_queue.task_done()
+            while not self._sink_clock_queue.empty():
+                self._sink_clock_queue.get_nowait()
+                self._sink_clock_queue.task_done()
+
+            # Camera output does not need a continuous media clock.
             await self._cancel_camera_task()
-            # Create sink and camera tasks.
             self._create_camera_task()
-            self._create_sink_tasks()
             # Let's send a bot stopped speaking if we have to.
             await self._bot_stopped_speaking()
 
