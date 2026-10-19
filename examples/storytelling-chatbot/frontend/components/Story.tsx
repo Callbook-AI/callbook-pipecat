@@ -53,7 +53,7 @@ const Story: React.FC<StoryProps> = ({ handleLeave }) => {
           Exit
         </Button>
       </header>
-      <div className="absolute inset-0 bg-gray-800 bg-opacity-90 z-10 fade-in"></div>
+      <div className="absolute inset-0 bg-gray-800/90 z-10 fade-in"></div>
 
       {/* Static elements */}
       <div className="relative z-20 flex-1 flex items-center justify-center">
