@@ -2,7 +2,7 @@
 
 The bundled examples use their own package manifests and are not the dependency
 set installed by a consumer of this framework. Update and test each example in
-its directory. The Python examples now use upstream pipecat-ai 0.0.94, including
+its directory. The Python examples now use upstream pipecat-ai 1.5.0, including
 its service and transport import paths; they do not install this older fork.
 
 ## LiveKit serializer migration
@@ -44,7 +44,7 @@ fixes before removing the compatibility notes or claiming a clean mobile audit.
 
 Six web example frozen installs, builds and audits passed; mobile iOS/Android
 Hermes bundles and native project generation passed. The three Python examples
-have seven offline compatibility tests. No live provider session, actual native
+have eleven offline compatibility tests. No live provider session, actual native
 compilation, device audio or downstream voice deployment is established by them.
 
 The original framework CI cannot collect Deepgram tests because its test extras
@@ -59,3 +59,26 @@ Build distributions from a clean checkout. Setuptools can retain removed modules
 in an old `build/lib` directory. The build workflow installs the actual wheel in
 isolation and checks that the removed serializer is absent while protobuf audio
 still round-trips; checking the source tree alone does not verify the artifact.
+
+
+## Patched SDK follow-up
+
+Version 0.0.94 fixes the removed pickle serializer but is still affected by
+[development-runner call control](https://github.com/advisories/GHSA-j8cv-x86q-rj85)
+and [file traversal](https://github.com/advisories/GHSA-3363-2ph6-35wh).
+All three standalone Python examples therefore use 1.5.0, which fixes both.
+This requires Python 3.11 or newer. Their context, VAD and lifecycle contracts
+run in separate CI jobs using each example's own dependency set on Python 3.12.
+The fork's runtime dependency set is separate and retains its existing API.
+
+The SDK uses NLTK's `punkt_tab` sentence tokenizer. Preload that public resource
+when building a container or preparing the local environment, so startup and
+first-response text processing do not depend on downloading it at runtime.
+
+
+Pipecat 1.5 moves voice-activity handling into the user aggregator. The examples
+keep an explicit speech-timeout turn strategy rather than adopting a new turn
+model implicitly. The CUDA Whisper example includes a VAD processor and forwards
+control frames through its transcript logger; otherwise transcription or worker
+startup can stall. The lifecycle tests process actual synthetic frames through
+those paths, with provider/model inference and audio hardware boundaries mocked.

@@ -37,7 +37,7 @@ Get a quick glimpse of the app in action!
 ## 🔧 Installation
 
 
-Use Python 3.11 or 3.12. Install PortAudio development headers first (for example, `brew install portaudio` on macOS or `apt install portaudio19-dev` on Debian/Ubuntu).
+Use Python 3.11 or 3.12 (Python 3.10 is no longer supported). This CUDA example targets Linux with an NVIDIA GPU. Install PortAudio development headers first (`apt install portaudio19-dev` on Debian/Ubuntu). Apple Silicon is not supported by this CUDA configuration.
 
 Install Dependencies:
 
@@ -95,4 +95,10 @@ Run the offline dependency compatibility checks from this example directory:
 
 ```bash
 python -m unittest test_dependency_compatibility.py
+```
+
+Before running offline, preload the sentence tokenizer after installing requirements:
+
+```bash
+python -m nltk.downloader punkt_tab
 ```

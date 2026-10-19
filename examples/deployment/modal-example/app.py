@@ -12,8 +12,14 @@ MAX_SESSION_TIME = 15 * 60  # 15 minutes
 app = modal.App("pipecat-modal")
 
 
-image = modal.Image.debian_slim(python_version="3.12").pip_install_from_requirements(
-    "requirements.txt"
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install_from_requirements("requirements.txt")
+    .run_commands(
+        "python -c \"import nltk; nltk.download('punkt_tab', "
+        "download_dir='/usr/local/share/nltk_data', raise_on_error=True)\""
+    )
+    .env({"NLTK_DATA": "/usr/local/share/nltk_data"})
 )
 
 

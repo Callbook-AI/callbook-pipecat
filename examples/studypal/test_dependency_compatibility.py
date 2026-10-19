@@ -2,12 +2,24 @@
 
 import asyncio
 import io
+import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import studypal
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+from pipecat.frames.frames import (
+    EndFrame,
+    LLMContextFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    TextFrame,
+    TranscriptionFrame,
+)
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.utils.text.simple_text_aggregator import SimpleTextAggregator
 
 
 class Response:
@@ -39,7 +51,7 @@ class Session:
         return self.response
 
 
-class StudyPalDependencyCompatibility(unittest.TestCase):
+class StudyPalDependencyCompatibility(unittest.IsolatedAsyncioTestCase):
     def test_extracts_real_pdf_and_normalizes_arxiv_url(self):
         writer = PdfWriter()
         page = writer.add_blank_page(width=300, height=300)
@@ -87,6 +99,142 @@ class StudyPalDependencyCompatibility(unittest.TestCase):
         with patch.object(studypal.tiktoken, "encoding_for_model", return_value=Encoding()):
             self.assertEqual(studypal.truncate_content("Article", "gpt-4o-mini"), "Article")
             self.assertEqual(len(studypal.truncate_content("a" * 12000, "gpt-4o-mini")), 10000)
+
+    async def test_real_pipeline_retains_audio_vad_context_and_participant_lifecycle(self):
+        captured = {}
+        real_transport = studypal.DailyTransport
+        real_pair = studypal.LLMContextAggregatorPair
+
+        def transport_factory(*args, **kwargs):
+            captured["transport"] = real_transport(*args, **kwargs)
+            captured["params"] = args[3]
+            return captured["transport"]
+
+        def pair_factory(context, **kwargs):
+            captured["context"] = context
+            captured["user_params"] = kwargs["user_params"]
+            return real_pair(context, **kwargs)
+
+        async def run_pipeline(worker):
+            captured["worker"] = worker
+            transport = captured["transport"]
+            with (
+                patch.object(
+                    transport, "capture_participant_transcription", new_callable=AsyncMock
+                ) as capture,
+                patch.object(worker, "queue_frames", new_callable=AsyncMock) as queue,
+                patch.object(worker, "cancel", new_callable=AsyncMock) as cancel,
+            ):
+                for handler in transport._event_handlers["on_first_participant_joined"].handlers:
+                    await handler(transport, {"id": "synthetic-participant"})
+                capture.assert_awaited_once_with("synthetic-participant")
+                self.assertIsInstance(queue.await_args.args[0][0], studypal.LLMRunFrame)
+                self.assertIn("ready to discuss", captured["context"].get_messages()[-1]["content"])
+                for handler in transport._event_handlers["on_participant_left"].handlers:
+                    await handler(transport, {"id": "synthetic-participant"}, "left")
+                cancel.assert_awaited_once()
+
+        with (
+            patch("builtins.input", return_value="https://example.invalid/article"),
+            patch.object(
+                studypal,
+                "configure",
+                new_callable=AsyncMock,
+                return_value=("https://synthetic.daily.co/room", "synthetic-room-token"),
+            ),
+            patch.object(
+                studypal,
+                "get_article_content",
+                new_callable=AsyncMock,
+                return_value="Synthetic article text.",
+            ),
+            patch.object(studypal, "truncate_content", return_value="Synthetic article text."),
+            patch.dict(
+                os.environ, {"CARTESIA_API_KEY": "synthetic", "OPENAI_API_KEY": "synthetic"}
+            ),
+            patch.object(studypal, "DailyTransport", side_effect=transport_factory),
+            patch.object(studypal, "LLMContextAggregatorPair", side_effect=pair_factory),
+            patch.object(studypal.PipelineRunner, "run", side_effect=run_pipeline),
+        ):
+            await studypal.main()
+        params = captured["params"]
+        self.assertTrue(params.audio_in_enabled)
+        self.assertTrue(params.audio_out_enabled)
+        self.assertTrue(params.audio_in_passthrough)
+        self.assertTrue(params.transcription_enabled)
+        user_params = captured["user_params"]
+        self.assertIsInstance(user_params.vad_analyzer, studypal.SileroVADAnalyzer)
+        self.assertIsInstance(
+            user_params.user_turn_strategies.stop[0], studypal.SpeechTimeoutUserTurnStopStrategy
+        )
+        self.assertIsInstance(captured["worker"], studypal.PipelineWorker)
+
+        self.assertIn("Synthetic article text.", captured["context"].get_messages()[0]["content"])
+
+    async def test_universal_context_preserves_real_user_and_assistant_turns(self):
+        context = studypal.LLMContext([{"role": "system", "content": "Synthetic study session."}])
+        response_seen = asyncio.Event()
+        assertions = self
+
+        class OfflineLLM(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                if isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
+                    assertions.assertEqual(
+                        frame.context.get_messages()[-1],
+                        {"role": "user", "content": "Synthetic user question."},
+                    )
+                    await self.push_frame(LLMFullResponseStartFrame())
+                    await self.push_frame(TextFrame("Synthetic assistant answer."))
+                    await self.push_frame(LLMFullResponseEndFrame())
+                    response_seen.set()
+                else:
+                    await self.push_frame(frame, direction)
+
+        pair = studypal.LLMContextAggregatorPair(
+            context,
+            user_params=studypal.LLMUserAggregatorParams(
+                user_turn_strategies=studypal.UserTurnStrategies(
+                    stop=[studypal.SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.01)]
+                )
+            ),
+        )
+        worker = studypal.PipelineWorker(
+            studypal.Pipeline([pair.user(), OfflineLLM(), pair.assistant()])
+        )
+        running = asyncio.create_task(studypal.PipelineRunner(handle_sigint=False).run(worker))
+        try:
+            await worker.queue_frames(
+                [
+                    TranscriptionFrame(
+                        "Synthetic user question.", "synthetic", "2026-10-19T00:00:00Z"
+                    )
+                ]
+            )
+            await asyncio.wait_for(response_seen.wait(), timeout=5)
+            await worker.queue_frames([EndFrame()])
+            await asyncio.wait_for(running, timeout=5)
+        finally:
+            if not running.done():
+                await worker.cancel()
+                await running
+        self.assertEqual(
+            context.get_messages()[-1],
+            {"role": "assistant", "content": "Synthetic assistant answer."},
+        )
+
+    async def test_first_spoken_sentences_use_preloaded_tokenizer(self):
+        aggregator = SimpleTextAggregator()
+        sentences = []
+        for chunk in ["Hello, Dr. ", "Medina. ", "Your balance is $29.50. ", "Next sentence. "]:
+            async for aggregation in aggregator.aggregate(chunk):
+                sentences.append(aggregation.text)
+        final = await aggregator.flush()
+        if final:
+            sentences.append(final.text)
+        self.assertEqual(
+            sentences, ["Hello, Dr. Medina.", "Your balance is $29.50.", "Next sentence."]
+        )
 
 
 if __name__ == "__main__":

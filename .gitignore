@@ -55,3 +55,6 @@ docs/api/api
 node_modules/
 .next/
 .expo/
+
+# Public tokenizer data prepared for offline example checks
+.nltk_data/

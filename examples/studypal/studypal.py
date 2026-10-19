@@ -12,13 +12,20 @@ from pypdf import PdfReader
 from runner import configure
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
+from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 load_dotenv(override=True)
 
@@ -115,17 +122,22 @@ async def main():
                 audio_in_enabled=True,
                 audio_out_enabled=True,
                 transcription_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
             ),
         )
 
         tts = CartesiaTTSService(
             api_key=os.getenv("CARTESIA_API_KEY"),
-            voice_id=os.getenv("CARTESIA_VOICE_ID", "4d2fd738-3b3d-4368-957a-bb4805275bd9"),
+            settings=CartesiaTTSService.Settings(
+                voice=os.getenv("CARTESIA_VOICE_ID", "4d2fd738-3b3d-4368-957a-bb4805275bd9"),
+                model="sonic-3",
+            ),
             # British Narration Lady: 4d2fd738-3b3d-4368-957a-bb4805275bd9
         )
 
-        llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o-mini")
+        llm = OpenAILLMService(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            settings=OpenAILLMService.Settings(model="gpt-4o-mini"),
+        )
 
         messages = [
             {
@@ -139,8 +151,16 @@ Your task is to help the user understand and learn from this article in 2 senten
             },
         ]
 
-        context = OpenAILLMContext(messages)
-        context_aggregator = llm.create_context_aggregator(context)
+        context = LLMContext(messages)
+        context_aggregator = LLMContextAggregatorPair(
+            context,
+            user_params=LLMUserAggregatorParams(
+                vad_analyzer=SileroVADAnalyzer(),
+                user_turn_strategies=UserTurnStrategies(
+                    stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.6)]
+                ),
+            ),
+        )
 
         pipeline = Pipeline(
             [
@@ -153,11 +173,10 @@ Your task is to help the user understand and learn from this article in 2 senten
             ]
         )
 
-        task = PipelineTask(
+        task = PipelineWorker(
             pipeline,
             params=PipelineParams(
                 audio_out_sample_rate=44100,
-                allow_interruptions=True,
                 enable_metrics=True,
             ),
         )
@@ -171,7 +190,7 @@ Your task is to help the user understand and learn from this article in 2 senten
                     "content": "Hello! I'm ready to discuss the article with you. What would you like to learn about?",
                 }
             )
-            await task.queue_frames([context_aggregator.user().get_context_frame()])
+            await task.queue_frames([LLMRunFrame()])
 
         @transport.event_handler("on_participant_left")
         async def on_participant_left(transport, participant, reason):
