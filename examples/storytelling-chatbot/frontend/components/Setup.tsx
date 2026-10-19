@@ -19,7 +19,7 @@ export const Setup: React.FC<SetupProps> = ({ handleStart }) => {
 
   return (
     <div className="w-full flex flex-col items-center justify-between">
-      <div className="bg-white rounded-3xl cardAnim cardShadow p-9 max-w-screen-sm mx-auto outline outline-[5px] outline-gray-600/10 my-auto">
+      <div className="bg-white rounded-3xl cardAnim cardShadow p-9 max-w-(--breakpoint-sm) mx-auto outline-solid outline-[5px] outline-gray-600/10 my-auto">
         <div className="flex flex-col gap-6">
           <h1 className="text-4xl font-bold text-pretty tracking-tighter mb-4">
             Welcome to <span className="text-sky-500">Storytime</span>

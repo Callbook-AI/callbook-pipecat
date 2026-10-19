@@ -37,6 +37,8 @@ Get a quick glimpse of the app in action!
 ## 🔧 Installation
 
 
+Use Python 3.11 or 3.12. Install PortAudio development headers first (for example, `brew install portaudio` on macOS or `apt install portaudio19-dev` on Debian/Ubuntu).
+
 Install Dependencies:
 
 ```bash
@@ -86,3 +88,11 @@ The project relies on:
 ## Example improvements:
 
 I plan to improve this example with local LLM calls and audio output.
+
+Whisper runs through faster-whisper/CTranslate2, so PyTorch, torchvision and torchaudio are not required. CUDA execution still requires the compatible NVIDIA cuBLAS/cuDNN libraries described in the [faster-whisper GPU installation guide](https://github.com/SYSTRAN/faster-whisper#gpu). The default `device="cuda"` requires an NVIDIA GPU.
+
+Run the offline dependency compatibility checks from this example directory:
+
+```bash
+python -m unittest test_dependency_compatibility.py
+```

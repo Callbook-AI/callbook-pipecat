@@ -11,3 +11,11 @@ studypal is a fast conversational AI built using [Daily](https://www.daily.co/) 
 3. Install the required packages: `pip install -r requirements.txt`
 4. Run `python3 studypal.py` from your command line.
 5. While the app is running, go to the `https://<yourdomain>.daily.co/<room_url>` set in `DAILY_SAMPLE_ROOM_URL` and talk to studypal!
+
+Use Python 3.11 or 3.12 with the pinned Pipecat 0.0.94 dependencies.
+
+Run the offline dependency compatibility checks from this example directory:
+
+```bash
+python -m unittest test_dependency_compatibility.py
+```

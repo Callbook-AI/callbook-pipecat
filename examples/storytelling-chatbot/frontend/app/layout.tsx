@@ -10,13 +10,13 @@ import { cn } from "@/app/utils";
 const sans = Space_Grotesk({
   subsets: ["latin"],
   weight: ["400", "500", "600"],
-  variable: "--font-sans",
+  variable: "--font-space-grotesk",
 });
 
 const mono = Space_Mono({
   subsets: ["latin"],
   weight: ["400", "700"],
-  variable: "--font-mono",
+  variable: "--font-space-mono",
 });
 
 export const metadata: Metadata = {

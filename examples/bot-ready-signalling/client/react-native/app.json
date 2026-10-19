@@ -19,7 +19,6 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bitcode": false,
       "bundleIdentifier": "co.daily.expo.BotReady",
       "infoPlist": {
         "UIBackgroundModes": [
@@ -54,19 +53,12 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "@config-plugins/react-native-webrtc",
       "@daily-co/config-plugin-rn-daily-js",
       [
         "expo-build-properties",
         {
           "android": {
-            "minSdkVersion": 24,
-            "compileSdkVersion": 35,
-            "targetSdkVersion": 34,
-            "buildToolsVersion": "35.0.0"
-          },
-          "ios": {
-            "deploymentTarget": "15.1"
+            "minSdkVersion": 24
           }
         }
       ]

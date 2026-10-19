@@ -4,6 +4,22 @@ Basic implementation using the [Pipecat React Native SDK](https://docs.pipecat.a
 
 ## Usage
 
+### Supported native dependencies
+
+This example uses Expo SDK 57 / React Native 0.86 and the Daily-supported
+`0.88.0` SDK, `124.0.6-daily.2` WebRTC, and `0.0.13` config plugin.
+See [Daily's compatibility matrix](https://github.com/daily-co/rn-daily-js-expo-config-plugin#versioning).
+Daily's plugin now configures WebRTC itself; do not add the separate
+`@config-plugins/react-native-webrtc` plugin. Expo selects the Android compile,
+target and build-tools versions; only this app's Android minimum SDK is overridden.
+Expo SDK 57 requires iOS 16.4 or newer.
+
+The lockfile overrides only `xcode`'s `uuid` dependency to the maintained
+CommonJS-compatible 11.x line. `xcode` uses its unchanged `v4()` API.
+
+After updating the lockfile, regenerate both native projects and rebuild the
+development client. A JavaScript bundle alone does not update the native SDK.
+
 ### Expo requirements
 
 This project cannot be used with an [Expo Go](https://docs.expo.dev/workflow/expo-go/) app because [it requires custom native code](https://docs.expo.io/workflow/customizing/).
@@ -30,10 +46,10 @@ You will need to have installed locally on your computer:
 nvm i
 
 # Install dependencies
-npm i
+npm ci
 
 # Before a native app can be compiled, the native source code must be generated.
-npx expo prebuild
+npx expo prebuild --clean
 
 # Configure the environment variable to connect to the local server
 cp env.example .env

@@ -10,9 +10,9 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.services.cartesia import CartesiaTTSService
-from pipecat.services.openai import OpenAILLMService
-from pipecat.transports.services.daily import DailyParams, DailyTransport
+from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.transports.daily.transport import DailyParams, DailyTransport
 
 load_dotenv(override=True)
 
@@ -26,9 +26,9 @@ async def main(room_url: str, token: str):
         token,
         "bot",
         DailyParams(
+            audio_in_enabled=True,
             audio_out_enabled=True,
             transcription_enabled=True,
-            vad_enabled=True,
             vad_analyzer=SileroVADAnalyzer(),
         ),
     )
