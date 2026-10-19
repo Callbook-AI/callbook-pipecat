@@ -97,8 +97,4 @@ Run the offline dependency compatibility checks from this example directory:
 python -m unittest test_dependency_compatibility.py
 ```
 
-Before running offline, preload the sentence tokenizer after installing requirements:
-
-```bash
-python -m nltk.downloader punkt_tab
-```
+Pipecat 1.13.0 uses the installed sentencex tokenizer for sentence boundaries, including the first spoken response.

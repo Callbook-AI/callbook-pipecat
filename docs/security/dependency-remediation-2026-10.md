@@ -2,7 +2,7 @@
 
 The bundled examples use their own package manifests and are not the dependency
 set installed by a consumer of this framework. Update and test each example in
-its directory. The Python examples now use upstream pipecat-ai 1.5.0, including
+its directory. The Python examples now use upstream pipecat-ai 1.13.0, including
 its service and transport import paths; they do not install this older fork.
 
 ## LiveKit serializer migration
@@ -66,17 +66,25 @@ still round-trips; checking the source tree alone does not verify the artifact.
 Version 0.0.94 fixes the removed pickle serializer but is still affected by
 [development-runner call control](https://github.com/advisories/GHSA-j8cv-x86q-rj85)
 and [file traversal](https://github.com/advisories/GHSA-3363-2ph6-35wh).
-All three standalone Python examples therefore use 1.5.0, which fixes both.
+All three standalone Python examples use the current stable 1.13.0 release.
 This requires Python 3.11 or newer. Their context, VAD and lifecycle contracts
 run in separate CI jobs using each example's own dependency set on Python 3.12.
 The fork's runtime dependency set is separate and retains its existing API.
 
-The SDK uses NLTK's `punkt_tab` sentence tokenizer. Preload that public resource
-when building a container or preparing the local environment, so startup and
-first-response text processing do not depend on downloading it at runtime.
+Pipecat 1.5 is also affected by
+[development-runner exposure](https://github.com/advisories/GHSA-hqm2-cfx2-2vgh),
+whose boundary is clarified starting in 1.6. The development runner intentionally
+has unauthenticated endpoints and must remain local; a production application
+needs an authenticated dispatcher. An SDK upgrade does not add production
+authentication to that development tool.
+
+The final 1.13 SDK uses bundled Sentencex tokenization. Its clean dependency
+installation does not require NLTK or a startup tokenizer download. The tests
+exercise first-utterance sentence boundaries directly; the older SDK's NLTK
+image bootstrap and CI download step are removed.
 
 
-Pipecat 1.5 moves voice-activity handling into the user aggregator. The examples
+Pipecat 1.x moves voice-activity handling into the user aggregator. The examples
 keep an explicit speech-timeout turn strategy rather than adopting a new turn
 model implicitly. The CUDA Whisper example includes a VAD processor and forwards
 control frames through its transcript logger; otherwise transcription or worker

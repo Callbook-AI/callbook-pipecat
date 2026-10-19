@@ -27,6 +27,7 @@ class LocalTranscriptionCompatibility(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, "VADProcessor", wraps=bot.VADProcessor) as vad,
             patch.object(bot, "Pipeline", wraps=bot.Pipeline) as pipeline,
         ):
+            model.return_value.supported_languages = ["en", "es"]
             await bot.main(7, 9)
         params = transport.call_args.args[0]
         self.assertTrue(params.audio_in_enabled)
@@ -42,6 +43,7 @@ class LocalTranscriptionCompatibility(unittest.IsolatedAsyncioTestCase):
 
     async def test_segmented_pcm_produces_logged_transcription(self):
         with patch.object(whisper_stt, "WhisperModel") as model, patch("builtins.print") as output:
+            model.return_value.supported_languages = ["en", "es"]
             model.return_value.transcribe.return_value = (
                 [SimpleNamespace(text="Synthetic spoken phrase.", no_speech_prob=0.01)],
                 None,
@@ -59,7 +61,10 @@ class LocalTranscriptionCompatibility(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(bot.PipelineRunner(handle_sigint=False).run(worker), timeout=5)
         model.return_value.transcribe.assert_called_once()
         output.assert_any_call("Transcription: Synthetic spoken phrase. ")
-        self.assertEqual(len(model.return_value.transcribe.call_args.args[0]), 800)
+        samples = model.return_value.transcribe.call_args.args[0]
+        self.assertEqual(samples[:800].tolist(), [1 / 32768] * 800)
+        # Newer Whisper services pad the end of a segment with silence.
+        self.assertTrue((samples[800:] == 0).all())
 
 
 if __name__ == "__main__":
