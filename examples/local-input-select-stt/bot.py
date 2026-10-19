@@ -12,10 +12,12 @@ from dotenv import load_dotenv
 from loguru import logger
 from select_audio_device import AudioDevice, run_device_selector
 
+from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import Frame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.worker import PipelineWorker
+from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.whisper.stt import Model, WhisperSTTService
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
@@ -32,6 +34,7 @@ class TranscriptionLogger(FrameProcessor):
 
         if isinstance(frame, TranscriptionFrame):
             print(f"Transcription: {frame.text}")
+        await self.push_frame(frame, direction)
 
 
 async def main(input_device: int, output_device: int):
@@ -44,13 +47,17 @@ async def main(input_device: int, output_device: int):
         )
     )
 
-    stt = WhisperSTTService(device="cuda", model=Model.LARGE, no_speech_prob=0.3)
+    stt = WhisperSTTService(
+        device="cuda",
+        settings=WhisperSTTService.Settings(model=Model.LARGE.value, no_speech_prob=0.3),
+    )
 
     tl = TranscriptionLogger()
 
-    pipeline = Pipeline([transport.input(), stt, tl])
+    vad = VADProcessor(vad_analyzer=SileroVADAnalyzer())
+    pipeline = Pipeline([transport.input(), vad, stt, tl])
 
-    task = PipelineTask(pipeline)
+    task = PipelineWorker(pipeline)
 
     runner = PipelineRunner(handle_sigint=False if sys.platform == "win32" else True)
 
