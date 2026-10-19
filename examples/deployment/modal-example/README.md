@@ -36,7 +36,7 @@ This app sets some sensible defaults for reducing cold starts, such as `minkeep_
 
 It has been configured to only allow a concurrency of 1 (`max_inputs=1`) as each user will require their own running function.
 
-Use Python 3.11 or 3.12 (Python 3.10 is no longer supported) with the pinned Pipecat 1.5.0 dependencies.
+Use Python 3.11 or 3.12 (Python 3.10 is no longer supported) with the pinned Pipecat 1.13.0 dependencies.
 
 Run the offline dependency compatibility checks from this example directory:
 
@@ -44,10 +44,4 @@ Run the offline dependency compatibility checks from this example directory:
 python -m unittest test_dependency_compatibility.py
 ```
 
-Before running offline, preload the sentence tokenizer after installing requirements:
-
-```bash
-python -m nltk.downloader punkt_tab
-```
-
-The Modal image includes this resource during its build. No tokenizer download is required when a session starts.
+Pipecat 1.13.0 uses the installed sentencex tokenizer for sentence boundaries, including the first spoken response.

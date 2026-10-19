@@ -12,7 +12,7 @@ studypal is a fast conversational AI built using [Daily](https://www.daily.co/) 
 4. Run `python3 studypal.py` from your command line.
 5. While the app is running, go to the `https://<yourdomain>.daily.co/<room_url>` set in `DAILY_SAMPLE_ROOM_URL` and talk to studypal!
 
-Use Python 3.11 or 3.12 (Python 3.10 is no longer supported) with the pinned Pipecat 1.5.0 dependencies.
+Use Python 3.11 or 3.12 (Python 3.10 is no longer supported) with the pinned Pipecat 1.13.0 dependencies.
 
 Run the offline dependency compatibility checks from this example directory:
 
@@ -20,8 +20,4 @@ Run the offline dependency compatibility checks from this example directory:
 python -m unittest test_dependency_compatibility.py
 ```
 
-Before running offline, preload the sentence tokenizer after installing requirements:
-
-```bash
-python -m nltk.downloader punkt_tab
-```
+Pipecat 1.13.0 uses the installed sentencex tokenizer for sentence boundaries, including the first spoken response.

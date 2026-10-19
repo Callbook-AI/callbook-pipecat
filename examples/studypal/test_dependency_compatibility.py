@@ -223,7 +223,7 @@ class StudyPalDependencyCompatibility(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "Synthetic assistant answer."},
         )
 
-    async def test_first_spoken_sentences_use_preloaded_tokenizer(self):
+    async def test_first_spoken_sentences_use_bundled_tokenizer(self):
         aggregator = SimpleTextAggregator()
         sentences = []
         for chunk in ["Hello, Dr. ", "Medina. ", "Your balance is $29.50. ", "Next sentence. "]:
