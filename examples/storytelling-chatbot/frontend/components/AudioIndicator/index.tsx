@@ -59,7 +59,7 @@ export const AudioIndicatorBar: React.FC = () => {
   return (
     <div className="flex-1 bg-gray-200 h-[8px] rounded-full overflow-hidden">
       <div
-        className="bg-green-500 h-[8px] w-[0] rounded-full transition-all duration-100 ease"
+        className="bg-green-500 h-[8px] w-0 rounded-full transition-all duration-100 ease"
         ref={volRef}
       />
     </div>

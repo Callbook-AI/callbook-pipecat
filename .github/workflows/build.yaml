@@ -38,7 +38,23 @@ jobs:
         run: |
           source .venv/bin/activate
           python -m build
-      - name: Install project and other Python dependencies
+      - name: Install and verify the built wheel
         run: |
           source .venv/bin/activate
-          pip install --editable .
+          pip install dist/*.whl
+          python -I - <<'PYCODE'
+          import asyncio
+          import importlib.util
+          from pipecat.frames.frames import OutputAudioRawFrame
+          from pipecat.serializers.protobuf import ProtobufFrameSerializer
+
+          assert importlib.util.find_spec("pipecat.serializers.livekit") is None
+
+          async def check_audio():
+              serializer = ProtobufFrameSerializer()
+              frame = OutputAudioRawFrame(audio=b"\x01\x00", sample_rate=16000, num_channels=1)
+              restored = await serializer.deserialize(await serializer.serialize(frame))
+              assert (restored.audio, restored.sample_rate, restored.num_channels) == (frame.audio, 16000, 1)
+
+          asyncio.run(check_audio())
+          PYCODE

@@ -36,7 +36,7 @@ def launch_bot_process(room_url: str, token: str):
 )
 @modal.web_endpoint(method="POST")
 async def start():
-    from pipecat.transports.services.helpers.daily_rest import (
+    from pipecat.transports.daily.utils import (
         DailyRESTHelper,
         DailyRoomParams,
     )
@@ -64,11 +64,11 @@ async def start():
         if not token:
             raise HTTPException(status_code=500, detail=f"Failed to get token for room: {room.url}")
 
-        logger.info(f"Bot token created: {token}")
+        logger.info("Bot token created")
 
         # Spawn a new bot process
         launch_bot_process.spawn(room_url=room.url, token=token)
 
         # Return room URL to the user to join
         # Note: in production, you would want to return a token to the user
-        return JSONResponse(content={"room_url": room.url, token: token})
+        return JSONResponse(content={"room_url": room.url, "token": token})

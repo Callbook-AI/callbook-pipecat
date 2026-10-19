@@ -1,3 +1,5 @@
+@reference "../../app/globals.css";
+
 .container{
     position: relative;
     animation: fadeIn 3s ease;

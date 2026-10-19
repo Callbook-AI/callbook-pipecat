@@ -12,10 +12,13 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
-    "vite": "^6.0.9"
+    "vite": "^6.4.4"
   },
   "dependencies": {
     "@pipecat-ai/client-js": "^0.3.2",
     "@pipecat-ai/daily-transport": "^0.3.4"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

@@ -1,8 +1,5 @@
---extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.5.0+cu124
-torchvision 
-torchaudio
-pipecat[whisper, openai]
+pipecat-ai[whisper,local]==0.0.94
+python-dotenv==1.2.2
 textual==1.0.0
 pydantic-settings==2.7.1
 pyaudio==0.2.14

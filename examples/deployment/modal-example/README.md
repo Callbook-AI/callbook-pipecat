@@ -35,3 +35,11 @@ modal deploy app.py
 This app sets some sensible defaults for reducing cold starts, such as `minkeep_warm=1`, which will keep at least 1 warm instance ready for your bot function.
 
 It has been configured to only allow a concurrency of 1 (`max_inputs=1`) as each user will require their own running function.
+
+Use Python 3.11 or 3.12 with the pinned Pipecat 0.0.94 dependencies.
+
+Run the offline dependency compatibility checks from this example directory:
+
+```bash
+python -m unittest test_dependency_compatibility.py
+```
