@@ -28,17 +28,15 @@ callbook-core's inspected main requirements pin the fork to commit
 compatibility validation and delivery through that application's deployment path.
 
 
-## Remaining mobile tooling advisories
+## Removed React Native example
 
-The supported Expo 57 / Daily native SDK stack still includes `braces@3.0.3`
-([GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm))
-and `node-forge@1.4.0`
-([GHSA-86w9-cpqp-85rv](https://github.com/advisories/GHSA-86w9-cpqp-85rv)).
-At verification time neither advisory has a released fixed version. Braces is
-used by the Metro/build glob tooling; node-forge is pulled by Expo CLI tooling.
-These dependencies are retained and their findings remain open. npm's additional
-parent findings describe these same two underlying advisories. Recheck released
-fixes before removing the compatibility notes or claiming a clean mobile audit.
+The standalone React Native client at
+`examples/bot-ready-signalling/client/react-native` was removed on 2026-10-20.
+The maintained bot-ready-signalling example uses its JavaScript browser client.
+The removed demo was the only remaining manifest with the unpatched Braces and
+node-forge tooling dependencies. Removing the demo removes that dependency tree;
+this does not patch those upstream packages. The Python framework and downstream
+callbook-core requirements do not install the mobile demo's npm dependencies.
 
 ## Verification limits and existing framework failures
 
