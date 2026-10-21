@@ -88,3 +88,17 @@ model implicitly. The CUDA Whisper example includes a VAD processor and forwards
 control frames through its transcript logger; otherwise transcription or worker
 startup can stall. The lifecycle tests process actual synthetic frames through
 those paths, with provider/model inference and audio hardware boundaries mocked.
+
+## Disable automatic JavaScript dependency hooks
+
+Each of the six browser clients checks in `.npmrc` with `ignore-scripts=true`.
+Instant Voice also checks in `.yarnrc` with `ignore-scripts true` for its Yarn
+Classic lockfile. Normal `npm install`, `npm ci` and that client's Yarn install
+therefore skip dependency and project lifecycle hooks. Application commands such
+as `npm run build`, `npm run dev` and `npm run lint` still run explicitly.
+
+No dependency needs a blanket rebuild or install-hook exception for these
+clients: the platform-specific optional packages supply their native binaries.
+Keep this default when updating dependencies; validate a clean install and build
+before approving any specific package initialization. Do not use a global
+`ignore-scripts=false` override to restore all dependency hooks.
