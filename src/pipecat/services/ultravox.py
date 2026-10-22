@@ -8,6 +8,7 @@
 
 import json
 import os
+import re
 import time
 from typing import AsyncGenerator, List, Optional
 
@@ -40,6 +41,11 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
+DEFAULT_ULTRAVOX_MODEL = "fixie-ai/ultravox-v0_4_1-llama-3_1-8b"
+# The existing default model repository, resolved on 2026-10-21.
+DEFAULT_ULTRAVOX_REVISION = "d1d4298148a6584e085c15111f3348ca0cd47a19"
+
+
 class AudioBuffer:
     """Buffer to collect audio frames before processing.
 
@@ -62,6 +68,8 @@ class UltravoxModel:
 
     Args:
         model_name: The name or path of the Ultravox model to load
+        revision: Immutable Hugging Face commit SHA. Required for custom Hub models;
+            the default model has a built-in pin. Local directories need no Hub revision.
 
     Attributes:
         model_name: The name of the loaded model
@@ -70,8 +78,15 @@ class UltravoxModel:
         stop_token_ids: Optional token IDs to stop generation
     """
 
-    def __init__(self, model_name: str = "fixie-ai/ultravox-v0_4_1-llama-3_1-8b"):
+    def __init__(self, model_name: str = DEFAULT_ULTRAVOX_MODEL, *, revision: Optional[str] = None):
         self.model_name = model_name
+        if revision is None and not os.path.isdir(model_name):
+            if model_name != DEFAULT_ULTRAVOX_MODEL:
+                raise ValueError("Custom Hugging Face models require an immutable revision SHA")
+            revision = DEFAULT_ULTRAVOX_REVISION
+        if revision is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+            raise ValueError("revision must be a full 40-character Hugging Face commit SHA")
+        self.revision = revision
         self._initialize_engine()
         self._initialize_tokenizer()
         self.stop_token_ids = None
@@ -80,6 +95,9 @@ class UltravoxModel:
         """Initialize the vLLM engine for inference."""
         engine_args = AsyncEngineArgs(
             model=self.model_name,
+            revision=self.revision,
+            code_revision=self.revision,
+            tokenizer_revision=self.revision,
             gpu_memory_utilization=0.9,
             max_model_len=8192,
             trust_remote_code=True,
@@ -88,7 +106,7 @@ class UltravoxModel:
 
     def _initialize_tokenizer(self):
         """Initialize the tokenizer for the model."""
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, revision=self.revision)
 
     def format_prompt(self, messages: list):
         """Format chat messages into a prompt for the model.
@@ -177,6 +195,7 @@ class UltravoxSTTService(AIService):
 
     Args:
         model_size: The Ultravox model to use (ModelSize enum or string)
+        revision: Immutable Hub commit SHA for custom models; optional for the pinned default.
         hf_token: Hugging Face token for model access
         temperature: Sampling temperature for generation
         max_tokens: Maximum tokens to generate
@@ -193,7 +212,8 @@ class UltravoxSTTService(AIService):
     def __init__(
         self,
         *,
-        model_size: str = "fixie-ai/ultravox-v0_4_1-llama-3_1-8b",
+        model_size: str = DEFAULT_ULTRAVOX_MODEL,
+        revision: Optional[str] = None,
         hf_token: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: int = 100,
@@ -211,7 +231,7 @@ class UltravoxSTTService(AIService):
 
         # Initialize model
         model_name = model_size if isinstance(model_size, str) else model_size.value
-        self._model = UltravoxModel(model_name=model_name)
+        self._model = UltravoxModel(model_name=model_name, revision=revision)
 
         # Initialize service state
         self._buffer = AudioBuffer()
