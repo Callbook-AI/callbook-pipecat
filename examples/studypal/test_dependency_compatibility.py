@@ -73,8 +73,11 @@ class StudyPalDependencyCompatibility(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(data=data[:16]):
                 result = subprocess.run(
-                    [sys.executable, "-c", code], input=data,
-                    capture_output=True, timeout=5, check=False,
+                    [sys.executable, "-c", code],
+                    input=data,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected_error, result.stderr)
