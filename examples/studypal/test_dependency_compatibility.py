@@ -3,6 +3,8 @@
 import asyncio
 import io
 import os
+import subprocess
+import sys
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -52,6 +54,32 @@ class Session:
 
 
 class StudyPalDependencyCompatibility(unittest.IsolatedAsyncioTestCase):
+    def test_malformed_pdf_rejection_is_bounded_in_a_separate_process(self):
+        # The EOF-xref regression is the synthetic fixture from upstream #4170.
+        # A subprocess timeout also bounds a regression that blocks Python itself.
+        body = (
+            b"%PDF-1.0\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+            b"2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n"
+        )
+        tail = b"\nstartxref\n%d\n%%%%EOF" % len(body)
+        truncated_xref = body + b"xref\n0 3\n0000000000 65535 f \n" + tail
+        code = (
+            "import io,sys; from pypdf import PdfReader; "
+            "PdfReader(io.BytesIO(sys.stdin.buffer.read()))"
+        )
+        for data, expected_error in (
+            (b"not a PDF", b"PdfStreamError"),
+            (truncated_xref, b"PdfReadError"),
+        ):
+            with self.subTest(data=data[:16]):
+                result = subprocess.run(
+                    [sys.executable, "-c", code], input=data,
+                    capture_output=True, timeout=5, check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
+        self.assertIn(b"Unexpected EOF in Xref table", result.stderr)
+
     def test_extracts_real_pdf_and_normalizes_arxiv_url(self):
         writer = PdfWriter()
         page = writer.add_blank_page(width=300, height=300)
