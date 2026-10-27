@@ -1,5 +1,5 @@
 beautifulsoup4==4.12.3
-pypdf==6.21.1
+pypdf==6.21.2
 tiktoken==0.7.0
 pipecat-ai[daily,openai]==1.13.0
 python-dotenv==1.2.2
